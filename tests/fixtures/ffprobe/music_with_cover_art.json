@@ -1,0 +1,26 @@
+{
+  "streams": [
+    {
+      "index": 0,
+      "codec_name": "aac",
+      "codec_type": "audio",
+      "duration": "201.3",
+      "disposition": {"default": 1, "attached_pic": 0}
+    },
+    {
+      "index": 1,
+      "codec_name": "mjpeg",
+      "codec_type": "video",
+      "width": 600,
+      "height": 600,
+      "r_frame_rate": "90000/1",
+      "avg_frame_rate": "0/0",
+      "disposition": {"default": 0, "attached_pic": 1}
+    }
+  ],
+  "format": {
+    "filename": "song.m4a",
+    "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+    "duration": "201.3"
+  }
+}

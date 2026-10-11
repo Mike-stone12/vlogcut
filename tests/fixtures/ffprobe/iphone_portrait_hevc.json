@@ -1,0 +1,45 @@
+{
+  "streams": [
+    {
+      "index": 0,
+      "codec_name": "hevc",
+      "codec_type": "video",
+      "width": 1920,
+      "height": 1080,
+      "r_frame_rate": "30/1",
+      "avg_frame_rate": "16200/541",
+      "duration": "18.033333",
+      "color_transfer": "arib-std-b67",
+      "disposition": {"default": 1, "attached_pic": 0},
+      "tags": {"creation_time": "2026-10-01T08:30:12.000000Z", "handler_name": "Core Media Video"},
+      "side_data_list": [
+        {"side_data_type": "Display Matrix", "rotation": -90}
+      ]
+    },
+    {
+      "index": 1,
+      "codec_name": "aac",
+      "codec_type": "audio",
+      "duration": "18.041667",
+      "disposition": {"default": 1, "attached_pic": 0}
+    },
+    {
+      "index": 2,
+      "codec_type": "data",
+      "codec_tag_string": "mebx",
+      "disposition": {"default": 1, "attached_pic": 0}
+    }
+  ],
+  "format": {
+    "filename": "IMG_4821.MOV",
+    "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+    "duration": "18.041667",
+    "tags": {
+      "creation_time": "2026-10-01T08:30:12.000000Z",
+      "com.apple.quicktime.location.ISO6709": "+31.2304+121.4737+004.000/",
+      "com.apple.quicktime.make": "Apple",
+      "com.apple.quicktime.model": "iPhone 15",
+      "com.apple.quicktime.creationdate": "2026-10-01T16:30:12+0800"
+    }
+  }
+}

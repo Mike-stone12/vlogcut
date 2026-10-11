@@ -1,0 +1,19 @@
+{
+  "streams": [
+    {
+      "index": 0,
+      "codec_name": "mjpeg",
+      "codec_type": "video",
+      "width": 4032,
+      "height": 3024,
+      "r_frame_rate": "25/1",
+      "avg_frame_rate": "25/1",
+      "disposition": {"default": 0, "attached_pic": 0}
+    }
+  ],
+  "format": {
+    "filename": "IMG_4822.JPG",
+    "format_name": "image2",
+    "duration": "0.040000"
+  }
+}

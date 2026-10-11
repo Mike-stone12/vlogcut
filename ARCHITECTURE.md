@@ -47,7 +47,8 @@ ingest → analyze → plan → validate/repair → render/export → feedback
 ```
 
 ### 1. Ingest
-- `ffprobe` metadata: duration, fps, resolution, rotation, creation time, GPS (if present)
+- `ffprobe` metadata: duration, fps, display resolution (rotation applied), creation time,
+  GPS (if present)
 - Low-res proxies for all analysis and preview rendering
 - Output: `MediaAsset` records
 
@@ -158,6 +159,14 @@ workspace/          per-project cache (gitignored)
 
 - 2026-10: v1 targets daily vlogs; chronological timeline; user-supplied music only.
 - 2026-10: role-based model config; local captioner + API planner as default hybrid.
+- 2026-10: ingest — `asset_id` is a content fingerprint (size + first/last 1 MiB, sha1)
+  so renames keep the cache; `MediaAsset.width/height` are display (post-rotation)
+  dimensions, no `rotation` field; `created_at` prefers Apple's `creationdate`
+  (keeps local offset), never falls back to file mtime; still images and audio-only
+  files are skipped. Proxies: short side 540 px, CFR at min(source fps, 30), same
+  timeline as the source so shot times map 1:1.
+- 2026-10: tests that need ffmpeg are marked `ffmpeg` and skip when it is missing;
+  fixture clips are generated with lavfi at test time, never committed.
 
 ## Open questions
 

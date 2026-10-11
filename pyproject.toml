@@ -23,6 +23,7 @@ packages = ["src/vlogcut"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = ["ffmpeg: needs ffmpeg/ffprobe (skipped automatically when missing)"]
 
 [tool.ruff]
 line-length = 100

@@ -1,0 +1,31 @@
+{
+  "streams": [
+    {
+      "index": 0,
+      "codec_name": "h264",
+      "codec_type": "video",
+      "width": 1920,
+      "height": 1080,
+      "r_frame_rate": "60/1",
+      "avg_frame_rate": "0/0",
+      "disposition": {"default": 1, "attached_pic": 0},
+      "tags": {"rotate": "90", "creation_time": "1970-01-01T00:00:00.000000Z"}
+    },
+    {
+      "index": 1,
+      "codec_name": "aac",
+      "codec_type": "audio",
+      "disposition": {"default": 1, "attached_pic": 0}
+    }
+  ],
+  "format": {
+    "filename": "VID_20261001_123456.mp4",
+    "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+    "duration": "42.5",
+    "tags": {
+      "creation_time": "2026-10-01T04:34:56.000000Z;2026-10-01T04:34:56.000000Z",
+      "location": "+22.5431+114.0579/",
+      "location-eng": "+22.5431+114.0579/"
+    }
+  }
+}
