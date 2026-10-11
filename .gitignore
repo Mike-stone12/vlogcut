@@ -1,0 +1,55 @@
+# local config and secrets
+config.yaml
+.env
+.env.*
+*.pem
+*.key
+secrets*
+
+# per-project caches, renders, logs
+workspace/
+*.jsonl
+*.log
+
+# media (never commit footage, music or keyframes)
+*.mp4
+*.MP4
+*.mov
+*.MOV
+*.mkv
+*.m4v
+*.avi
+*.webm
+*.hevc
+*.mp3
+*.m4a
+*.wav
+*.aac
+*.flac
+*.jpg
+*.jpeg
+*.JPG
+*.png
+*.heic
+*.HEIC
+*.dng
+
+# JianYing drafts
+draft_content.json
+draft_meta_info.json
+
+# python
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+
+# editors / OS / local agent settings
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.claude/settings.local.json

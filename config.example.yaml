@@ -1,0 +1,46 @@
+# Copy to config.yaml (gitignored) and fill in models you have access to.
+# Roles decide which model does which job; providers are any endpoint that
+# speaks the OpenAI chat-completions protocol. API keys come from env vars.
+
+log_path: workspace/llm_calls.jsonl
+
+providers:
+  local:                     # vLLM or Ollama serving an OpenAI-compatible API
+    base_url: http://localhost:8000/v1
+  openai:
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+  deepseek:
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+  dashscope:                 # Qwen via DashScope's OpenAI-compatible mode
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+
+roles:
+  # High volume, simple task: describe keyframes. Keep this cheap or local.
+  captioner:
+    provider: local
+    model: YOUR_LOCAL_VLM          # the name your local server exposes
+    temperature: 0.1
+    max_tokens: 512
+    json_mode: object              # many local servers lack full JSON-schema support
+
+  # Low volume, hardest reasoning: shot table + style profile -> EDL.
+  planner:
+    provider: openai
+    model: YOUR_BEST_MODEL
+    temperature: 0.3
+    max_tokens: 8192
+    json_mode: schema
+
+  # Turns free-text feedback into StyleProfile deltas.
+  feedback:
+    provider: deepseek
+    model: deepseek-chat
+    temperature: 0.2
+    max_tokens: 2048
+    json_mode: object
