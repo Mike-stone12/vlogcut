@@ -31,13 +31,32 @@ class MediaAsset(BaseModel):
 
 
 class QualityFlags(BaseModel):
-    """Cheap signal-level quality measurements for one shot."""
+    """Cheap signal-level quality measurements for one shot.
+
+    Measurements, not taste: blur and shake can be deliberate in a vlog, so only
+    clearly unusable footage is `rejected`. Soft issues go to `warnings`; whether they
+    matter is decided later from the style profile and the planner.
+    """
 
     sharpness: float  # variance of Laplacian; higher = sharper
     exposure_clip: float = Field(ge=0, le=1)  # fraction of clipped luma pixels
-    shake: float = Field(ge=0)  # optical-flow magnitude variance
+    # high-frequency camera jitter: global motion minus its smoothed path (RMS, px at
+    # 270p), so deliberate pans and zooms score low and hand shake scores high
+    shake: float = Field(ge=0)
     rejected: bool = False
     reject_reasons: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)  # soft issues; never reject alone
+    # suggested (in_s, out_s) offsets from the shot start, trimming e.g. the phone being
+    # raised or lowered; None = the whole shot is usable
+    usable_range: tuple[float, float] | None = None
+
+    @model_validator(mode="after")
+    def _check_range(self) -> QualityFlags:
+        if self.usable_range is not None:
+            lo, hi = self.usable_range
+            if not 0 <= lo < hi:
+                raise ValueError("usable_range must satisfy 0 <= in_s < out_s")
+        return self
 
 
 class Shot(BaseModel):
@@ -59,6 +78,9 @@ class Shot(BaseModel):
     def _check_bounds(self) -> Shot:
         if self.end_s <= self.start_s:
             raise ValueError(f"shot {self.shot_id}: end_s must be > start_s")
+        rng = self.quality.usable_range
+        if rng is not None and rng[1] > self.end_s - self.start_s + 1e-6:
+            raise ValueError(f"shot {self.shot_id}: usable_range ends after the shot")
         return self
 
     @property

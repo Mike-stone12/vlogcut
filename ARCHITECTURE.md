@@ -55,8 +55,12 @@ ingest → analyze → plan → validate/repair → render/export → feedback
 ### 2. Analyze (per shot)
 - Shot detection: PySceneDetect `AdaptiveDetector` for hard cuts + a blend-fit detector
   for cross-dissolves / fades (`analyze/transitions.py`); TransNetV2 later
-- Quality: blur (variance of Laplacian), exposure (clipped-luma fraction),
-  shake (optical-flow magnitude variance) → `rejected` + reasons
+- Quality (`analyze/quality.py`): blur (variance of Laplacian), exposure (clipped-luma
+  fraction), shake (high-frequency camera jitter: tile-median phase-correlation path
+  minus its smoothed path) → `rejected` + reasons only for clearly unusable footage,
+  soft `warnings`, and a suggested `usable_range` that trims bad starts / ends.
+  Measures, does not judge taste: tolerance for blur / shake comes later from the
+  style profile (`look`) and the planner
 - Near-duplicates: CLIP/SigLIP keyframe embeddings, clustered into `dup_group`
 - Caption: **captioner** role (VLM) on 1–3 keyframes → description, tags, interest 1–5
 - Speech: VAD + ASR (Whisper / FunASR) only when speech is present
@@ -154,8 +158,8 @@ workspace/          per-project cache (gitignored)
 - [x] Week 1 · ingest: ffprobe metadata → `MediaAsset` (`ingest/probe.py`)
 - [x] Week 1 · ingest: low-res proxies, cached per asset (`ingest/proxy.py`)
 - [x] Week 1 · analyze: shot detection, incl. dissolves / fades (`analyze/shots.py`, `analyze/transitions.py`)
-- [ ] Week 1 · analyze: quality flags (blur / exposure / shake)
-- [ ] Week 1 · rule-based chronological rough cut
+- [x] Week 1 · analyze: quality flags + full `Shot` records (`analyze/quality.py`)
+- [x] Week 1 · rule-based chronological rough cut (`plan/rules.py`)
 - [ ] Week 1 · FFmpeg preview render
 
 ## Evaluation (start in week 1)
@@ -206,8 +210,45 @@ workspace/          per-project cache (gitignored)
   rejected: it overshoots into static footage and merges fade halves. Wipes / slides
   are not detected.
 
+- 2026-10: quality — **schema change**: `QualityFlags` gains `warnings` (soft issues,
+  never reject alone) and `usable_range` (suggested in/out offsets within the shot;
+  `Shot` validates it fits); `shake` now means high-frequency jitter (RMS px at 270p)
+  instead of optical-flow magnitude variance, so pans and zooms are not "shaky".
+  Rationale: blur and shake are often deliberate in vlogs. Rejected only when bad from
+  start to end *and* near-black (> 95 % of pixels ≤ 5: covered lens), blown out
+  (> 90 % ≥ 250), or violently shaky with no sound (audio-active < 30 %). Blur alone
+  never rejects (skies, walls, soft focus). Per-frame "bad" = blur below max(10,
+  0.2 × shot p90), clipping, or local (0.5 s) RMS jitter > 25 px, majority-voted over
+  0.5 s; `usable_range` spans the first to last good run ≥ 0.5 s; shake is re-measured
+  on the usable part. Motion is measured at the proxy frame rate (at 10 fps fast shake
+  outgrew phase correlation), median over a 3×3 tile grid (a subject crossing the frame
+  moves few tiles), smoothed path = order-1 Savitzky-Golay over 1 s (moving average
+  inside, line fit at the ends) so a steady pan scores 0. Defaults calibrated on 18
+  generated cases (blur levels, black / blown / night, pan, subject crossing, zoom, mild
+  / strong / violent shake, phone raise with and without motion blur, focus hunt, sky).
+  Known gaps: absolute thresholds are not calibrated on real phone footage yet; shake
+  faster than ~45 px/frame at 270p is under-measured (motion blur then catches it); a
+  pan from detail to sky at a shot end may be suggested for trimming.
+- 2026-10: rule-based rough cut — no model; Week-1 baseline and later the fallback when
+  a planner EDL cannot be repaired. Default target 3 min (everything if less is usable),
+  default strategy "coverage", default pacing without a style profile p10 1.5 /
+  median 3 / p90 5 s. Coverage treats each recording as a moment of the day: every
+  moment gets a clip when slots allow, the rest by usable footage (largest remainder),
+  best shot per chronological bin; with fewer slots than moments, evenly spaced bins of
+  moments. (Plain shot-count bins let a long one-take crowd out the last scene.)
+  "highlights" = top-k by score, re-sorted by time. Lengths share one offset clamped
+  to p10..p90 and each shot's usable part; k grows / shrinks until the total is within
+  ±10 %. Clips sit mid-usable-part; shots `kept_for_audio` start at the usable start
+  and run to p90. Score is quality-only and pluggable (highlight features — faces,
+  audio peaks, motion peaks, composition — come with the style profile in week 2, with
+  weights learned from reference videos, not hard-coded).
+  Known gaps: "talking" is only known for shots kept_for_audio until VAD / ASR exists;
+  no near-duplicate check until keyframe embeddings exist.
+
 ## Open questions
 
-- Default target length and how many variants per run
+- How many variants per run
 - How to present variants for comparison (side-by-side preview page?)
 - Privacy mode details
+- Quality thresholds: calibrate on a real phone-footage eval set; per-project relative
+  thresholds?

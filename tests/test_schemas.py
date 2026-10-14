@@ -14,6 +14,16 @@ def test_shot_duration_and_bounds():
         Shot(shot_id="s2", asset_id="a1", start_s=5, end_s=5, quality=q)
 
 
+def test_quality_usable_range_must_fit_the_shot():
+    q = QualityFlags(sharpness=50, exposure_clip=0, shake=0.1, usable_range=(0.6, 4.0))
+    assert Shot(shot_id="s", asset_id="a", start_s=10, end_s=14.5, quality=q)
+    with pytest.raises(ValidationError):
+        Shot(shot_id="s", asset_id="a", start_s=10, end_s=13, quality=q)
+    with pytest.raises(ValidationError):
+        QualityFlags(sharpness=50, exposure_clip=0, shake=0, usable_range=(2.0, 1.0))
+    assert QualityFlags(sharpness=1, exposure_clip=0, shake=0).warnings == []
+
+
 def test_clip_speed_changes_timeline_duration():
     clip = Clip(shot_id="s1", in_s=0, out_s=4, speed=2.0)
     assert clip.timeline_duration_s == pytest.approx(2.0)
