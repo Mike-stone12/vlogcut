@@ -55,3 +55,13 @@ def run(name: Binary, args: list[str], *, timeout: float | None = None) -> str:
     if proc.returncode != 0:
         raise FFmpegError(cmd, proc.returncode, proc.stderr)
     return proc.stdout
+
+
+def run_bytes(name: Binary, args: list[str], *, timeout: float | None = None) -> bytes:
+    """Like `run`, but return raw stdout bytes (e.g. `-f rawvideo -` frame dumps)."""
+    cmd = [find_binary(name), *args]
+    log.debug("running %s", cmd)
+    proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    if proc.returncode != 0:
+        raise FFmpegError(cmd, proc.returncode, proc.stderr.decode("utf-8", errors="replace"))
+    return proc.stdout

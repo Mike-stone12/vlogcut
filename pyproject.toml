@@ -16,6 +16,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.5"]
+# heavy, imported lazily inside the functions that need them
+analyze = ["scenedetect>=0.7", "numpy>=1.26"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/vlogcut"]
@@ -23,7 +25,10 @@ packages = ["src/vlogcut"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-markers = ["ffmpeg: needs ffmpeg/ffprobe (skipped automatically when missing)"]
+markers = [
+  "ffmpeg: needs ffmpeg/ffprobe (skipped automatically when missing)",
+  "scenedetect: needs the [analyze] extra (skipped automatically when missing)",
+]
 
 [tool.ruff]
 line-length = 100

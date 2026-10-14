@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -23,13 +24,19 @@ def _have_ffmpeg() -> bool:
     return True
 
 
+def _have_scenedetect() -> bool:
+    return importlib.util.find_spec("scenedetect") is not None
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    if _have_ffmpeg():
-        return
-    skip = pytest.mark.skip(reason="ffmpeg/ffprobe not available")
+    missing = {
+        "ffmpeg": not _have_ffmpeg() and "ffmpeg/ffprobe not available",
+        "scenedetect": not _have_scenedetect() and 'needs pip install -e ".[analyze]"',
+    }
     for item in items:
-        if "ffmpeg" in item.keywords:
-            item.add_marker(skip)
+        for marker, reason in missing.items():
+            if reason and marker in item.keywords:
+                item.add_marker(pytest.mark.skip(reason=reason))
 
 
 @pytest.fixture

@@ -53,7 +53,8 @@ ingest → analyze → plan → validate/repair → render/export → feedback
 - Output: `MediaAsset` records
 
 ### 2. Analyze (per shot)
-- Shot detection: PySceneDetect (content detector) baseline; TransNetV2 later
+- Shot detection: PySceneDetect `AdaptiveDetector` for hard cuts + a blend-fit detector
+  for cross-dissolves / fades (`analyze/transitions.py`); TransNetV2 later
 - Quality: blur (variance of Laplacian), exposure (clipped-luma fraction),
   shake (optical-flow magnitude variance) → `rejected` + reasons
 - Near-duplicates: CLIP/SigLIP keyframe embeddings, clustered into `dup_group`
@@ -152,7 +153,7 @@ workspace/          per-project cache (gitignored)
 
 - [x] Week 1 · ingest: ffprobe metadata → `MediaAsset` (`ingest/probe.py`)
 - [x] Week 1 · ingest: low-res proxies, cached per asset (`ingest/proxy.py`)
-- [ ] Week 1 · analyze: shot detection
+- [x] Week 1 · analyze: shot detection, incl. dissolves / fades (`analyze/shots.py`, `analyze/transitions.py`)
 - [ ] Week 1 · analyze: quality flags (blur / exposure / shake)
 - [ ] Week 1 · rule-based chronological rough cut
 - [ ] Week 1 · FFmpeg preview render
@@ -185,6 +186,25 @@ workspace/          per-project cache (gitignored)
   proxy is reused only if its duration is within 0.25 s of the source.
   Known gaps: no HDR→SDR tone mapping yet (HLG/Dolby Vision proxies look flat); a VFR
   source whose average rate is < 30 gets that average, not 30.
+
+- 2026-10: shot detection — runs on proxies. Hard cuts: PySceneDetect `AdaptiveDetector`
+  (threshold 3.0), which tolerates pans and handheld shake. Shots < 0.5 s merge into
+  their shorter neighbour (flash frames); shots > 10 s split into equal parts so the
+  planner can pick from long one-takes. Output is `ShotSpan` (times + 3 keyframes at
+  25/50/75 %) cached in `<workspace>/shots/<asset_id>.json` with the params as cache
+  key; full `Shot` records are built after quality analysis, so `schemas.py` is
+  unchanged. `scenedetect` and `numpy` live in the optional `analyze` extra.
+- 2026-10: gradual transitions — no model: frames decoded at 15 fps, 64×64 luma; a
+  window is a dissolve if its ends differ (mean |Δ| > 0.05), are structurally different
+  (z-scored correlation < 0.5, rejects exposure swings) and the 1/4, 1/2, 3/4 frames fit
+  the linear blend (relative residual < 0.2, rejects pans/zooms/hard cuts). Among
+  overlapping hits, the longest window fitting within 0.02 of the best wins; the cut goes
+  at its midpoint, and hard cuts inside a transition are dropped. Fades through black are
+  two transitions. Precision is ±1 sample (67 ms) on short dissolves; on long (2 s)
+  dissolves over fast-changing content only part of the span fits, so the cut can land
+  ~0.3 s off-centre (still inside the transition). Growing spans outward was tried and
+  rejected: it overshoots into static footage and merges fade halves. Wipes / slides
+  are not detected.
 
 ## Open questions
 
