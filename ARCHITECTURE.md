@@ -159,7 +159,7 @@ workspace/          per-project cache (gitignored)
 - [x] Week 1 · ingest: low-res proxies, cached per asset (`ingest/proxy.py`)
 - [x] Week 1 · analyze: shot detection, incl. dissolves / fades (`analyze/shots.py`, `analyze/transitions.py`)
 - [x] Week 1 · analyze: quality flags + full `Shot` records (`analyze/quality.py`)
-- [ ] Week 1 · rule-based chronological rough cut
+- [x] Week 1 · rule-based chronological rough cut (`plan/rules.py`)
 - [ ] Week 1 · FFmpeg preview render
 
 ## Evaluation (start in week 1)
@@ -229,10 +229,25 @@ workspace/          per-project cache (gitignored)
   Known gaps: absolute thresholds are not calibrated on real phone footage yet; shake
   faster than ~45 px/frame at 270p is under-measured (motion blur then catches it); a
   pan from detail to sky at a shot end may be suggested for trimming.
+- 2026-10: rule-based rough cut — no model; Week-1 baseline and later the fallback when
+  a planner EDL cannot be repaired. Default target 3 min (everything if less is usable),
+  default strategy "coverage", default pacing without a style profile p10 1.5 /
+  median 3 / p90 5 s. Coverage treats each recording as a moment of the day: every
+  moment gets a clip when slots allow, the rest by usable footage (largest remainder),
+  best shot per chronological bin; with fewer slots than moments, evenly spaced bins of
+  moments. (Plain shot-count bins let a long one-take crowd out the last scene.)
+  "highlights" = top-k by score, re-sorted by time. Lengths share one offset clamped
+  to p10..p90 and each shot's usable part; k grows / shrinks until the total is within
+  ±10 %. Clips sit mid-usable-part; shots `kept_for_audio` start at the usable start
+  and run to p90. Score is quality-only and pluggable (highlight features — faces,
+  audio peaks, motion peaks, composition — come with the style profile in week 2, with
+  weights learned from reference videos, not hard-coded).
+  Known gaps: "talking" is only known for shots kept_for_audio until VAD / ASR exists;
+  no near-duplicate check until keyframe embeddings exist.
 
 ## Open questions
 
-- Default target length and how many variants per run
+- How many variants per run
 - How to present variants for comparison (side-by-side preview page?)
 - Privacy mode details
 - Quality thresholds: calibrate on a real phone-footage eval set; per-project relative
