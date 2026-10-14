@@ -148,6 +148,15 @@ workspace/          per-project cache (gitignored)
 | 3 | captioner + planner + validate/repair loop |
 | 4 | JianYing export, variants, README + demo video |
 
+### Progress
+
+- [x] Week 1 · ingest: ffprobe metadata → `MediaAsset` (`ingest/probe.py`)
+- [x] Week 1 · ingest: low-res proxies, cached per asset (`ingest/proxy.py`)
+- [ ] Week 1 · analyze: shot detection
+- [ ] Week 1 · analyze: quality flags (blur / exposure / shake)
+- [ ] Week 1 · rule-based chronological rough cut
+- [ ] Week 1 · FFmpeg preview render
+
 ## Evaluation (start in week 1)
 
 - ~10 footage sets, each with reference videos
@@ -167,6 +176,15 @@ workspace/          per-project cache (gitignored)
   timeline as the source so shot times map 1:1.
 - 2026-10: tests that need ffmpeg are marked `ffmpeg` and skip when it is missing;
   fixture clips are generated with lavfi at test time, never committed.
+- 2026-10: proxy details — H.264 CRF 28 + AAC 96k stereo, keyframe every ~1 s for
+  cheap seeking, metadata stripped, `+faststart`. Dimensions round *down* to even so a
+  proxy is never larger than its source; sources already ≤ 540 px keep their size.
+  Output rate is the exact fraction (29.97 stays 30000/1001). Rotation is baked in
+  (ffmpeg autorotate), so proxies are upright with no rotation tag. Cached at
+  `<workspace>/proxies/<asset_id>.mp4`, written via a `.part.mp4` temp file; a cached
+  proxy is reused only if its duration is within 0.25 s of the source.
+  Known gaps: no HDR→SDR tone mapping yet (HLG/Dolby Vision proxies look flat); a VFR
+  source whose average rate is < 30 gets that average, not 30.
 
 ## Open questions
 
