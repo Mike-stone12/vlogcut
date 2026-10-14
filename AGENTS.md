@@ -11,7 +11,8 @@ non-trivial change. `src/vlogcut/schemas.py` defines the data contracts.
 ## Commands
 
 ```bash
-pip install -e ".[dev]"   # install with dev tools
+pip install -e ".[dev,analyze]"   # install with dev tools + analysis deps
+vlogcut cut <footage folder> -t 180   # end to end: proxies, shots, quality, rough cut, preview
 pytest -q                 # tests (offline, no GPU, no API keys)
 ruff check . && ruff format --check .
 ```

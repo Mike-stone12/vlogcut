@@ -162,7 +162,9 @@ workspace/          per-project cache (gitignored)
 - [x] Week 1 · analyze: quality flags + full `Shot` records (`analyze/quality.py`)
 - [x] Week 1 · rule-based chronological rough cut (`plan/rules.py`)
 - [x] Week 1 · FFmpeg preview render (`render/preview.py`)
-- [ ] Week 1 · CLI: footage folder → preview in one command
+- [x] Week 1 · CLI: footage folder → preview in one command (`cli.py`, `pipeline.py`)
+
+Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 
 ## Evaluation (start in week 1)
 
@@ -258,6 +260,15 @@ workspace/          per-project cache (gitignored)
   gain + delay, mixed under programme audio (no ducking yet), fade-out at the end.
   Debug info is a soft `mov_text` subtitle track (this FFmpeg build has no
   freetype / libass, so nothing is burned in).
+- 2026-10: CLI — `vlogcut cut <folder>` (argparse, no new dependency; console script in
+  `pyproject.toml`). Shared steps live in `pipeline.py` so a later UI reuses them.
+  Folder scan is not recursive, skips hidden files, matches common video suffixes;
+  files ffprobe rejects are listed as skipped, not fatal. Default workspace
+  `./workspace/<folder name>`; writes `edl/<strategy>_<target>s.json`, `shots.json` and
+  `preview_<strategy>_<target>s.mp4`. Every stage is cached, so changing target or
+  strategy re-plans in ~2 s. Errors are one line with exit code 1. Coverage keeps
+  pacing first: when target / median gives fewer slots than recordings, it spreads
+  over the day instead of shortening every clip.
 
 ## Open questions
 
