@@ -92,7 +92,8 @@ Run the same analysis on reference videos, then aggregate:
   tolerance, audio fades, subtitle timing from ASR
 
 ### 6. Render / export
-- Preview mp4: FFmpeg on proxies (fast, low-res)
+- Preview mp4 (`render/preview.py`): FFmpeg on proxies (fast, low-res); cached per-clip
+  segments joined losslessly; debug subtitle track with source + reason per clip
 - JianYing draft: `pyJianYingDraft` (generation only; final export happens in the
   JianYing desktop app)
 - FCPXML for Premiere / Resolve / FCP (later)
@@ -160,7 +161,10 @@ workspace/          per-project cache (gitignored)
 - [x] Week 1 · analyze: shot detection, incl. dissolves / fades (`analyze/shots.py`, `analyze/transitions.py`)
 - [x] Week 1 · analyze: quality flags + full `Shot` records (`analyze/quality.py`)
 - [x] Week 1 · rule-based chronological rough cut (`plan/rules.py`)
-- [ ] Week 1 · FFmpeg preview render
+- [x] Week 1 · FFmpeg preview render (`render/preview.py`)
+- [x] Week 1 · CLI: footage folder → preview in one command (`cli.py`, `pipeline.py`)
+
+Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 
 ## Evaluation (start in week 1)
 
@@ -244,11 +248,35 @@ workspace/          per-project cache (gitignored)
   weights learned from reference videos, not hard-coded).
   Known gaps: "talking" is only known for shots kept_for_audio until VAD / ASR exists;
   no near-duplicate check until keyframe embeddings exist.
+- 2026-10: preview — every clip is rendered from its proxy into a cached segment
+  (H.264 + PCM in .mov, key = asset, source span, output frames, canvas, params) and
+  segments are joined with the concat demuxer (video copied, audio encoded once to
+  AAC). Clip boundaries are snapped to the frame grid on the cumulative timeline, so
+  the preview matches the EDL within half a frame and audio cannot drift. Canvas =
+  orientation covering most of the timeline (ties → portrait), 540 px short side,
+  30 fps; other-orientation clips are letterboxed in black (blur fill is a param, off
+  by default). 30 ms audio fades at every cut; clips without audio get silence; speed
+  via setpts + chained atempo. Music: `MusicCue.track_id` → a user-supplied file,
+  gain + delay, mixed under programme audio (no ducking yet), fade-out at the end.
+  Debug info is a soft `mov_text` subtitle track (this FFmpeg build has no
+  freetype / libass, so nothing is burned in).
+- 2026-10: CLI — `vlogcut cut <folder>` (argparse, no new dependency; console script in
+  `pyproject.toml`). Shared steps live in `pipeline.py` so a later UI reuses them.
+  Folder scan is not recursive, skips hidden files, matches common video suffixes;
+  files ffprobe rejects are listed as skipped, not fatal. Default workspace
+  `./workspace/<folder name>`; writes `edl/<strategy>_<target>s.json`, `shots.json` and
+  `preview_<strategy>_<target>s.mp4`. Every stage is cached, so changing target or
+  strategy re-plans in ~2 s. Errors are one line with exit code 1. Coverage keeps
+  pacing first: when target / median gives fewer slots than recordings, it spreads
+  over the day instead of shortening every clip.
 
 ## Open questions
 
 - How many variants per run
 - How to present variants for comparison (side-by-side preview page?)
 - Privacy mode details
+- Music: auto-pick / beat-match from a user's own library (week 2), and whether
+  voice cloning for narration (user's own voice, local, explicit consent) belongs in a
+  post-v1 plugin
 - Quality thresholds: calibrate on a real phone-footage eval set; per-project relative
   thresholds?
