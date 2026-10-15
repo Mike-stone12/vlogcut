@@ -1,4 +1,4 @@
-# vlogcut — Architecture (v0.1 draft)
+# vlogcut — Architecture (v0.2 draft)
 
 > `vlogcut` is a placeholder name. This file is the design source of truth;
 > `src/vlogcut/schemas.py` is the source of truth for data contracts.
@@ -14,11 +14,14 @@ produces several variants, takes feedback, and iterates.
 **In**
 - Daily vlog footage shot on phones (tens of clips, 0.5–2 h total)
 - 1–3 reference videos that define the target style
+- The creator's own past JianYing drafts as selection examples (optional; see
+  "Learning from past edits")
 - Output: JianYing (剪映) draft + low-res preview mp4, 2–4 variants per run
 - User-supplied background music only
 
 **Out (for v1)**
-- Story understanding / narrative restructuring (timeline stays chronological)
+- Story understanding / narrative restructuring (timeline stays chronological, except
+  an optional cold open; see Validate)
 - Generated footage, voice cloning
 - Color grading beyond simple parameter matching
 - Web UI (CLI first)
@@ -30,20 +33,27 @@ produces several variants, takes feedback, and iterates.
    JSON validated against `schemas.py`. Everything after that is deterministic.
 2. **Style is explicit parameters, not an embedding.** Every style dimension is
    measurable, human-readable and editable ("faster pacing" = lower shot-duration
-   range).
+   range). A learned model may *score* shots (see "Learning from past edits"), but it
+   is a plug-in scorer; the profile itself stays explicit.
 3. **Analyze once, plan many times.** Footage analysis is cached per project;
    planning and variants are cheap.
 4. **Roles, not vendors.** Every model call goes through `ModelRouter` and is
    configured by role in `config.yaml`. Every call is logged.
 5. **The core runs without any model.** Deterministic parts are testable offline
    with fixtures and a fake client.
+6. **Code proposes, models choose.** Cut points, candidate shots and transitions are
+   enumerated deterministically from signals; models pick among candidates rather than
+   inventing times.
+7. **Measure before trusting.** Every style or planning change is checked against the
+   eval set; the LLM planner becomes the default only if it beats rules + ranker there.
 
 ## Pipeline
 
 ```
 ingest → analyze → plan → validate/repair → render/export → feedback
-                ↑                                              │
-   references → style profile ←────────── profile deltas ──────┘
+                   ↑  ↑                                        │
+  references → style profile ←─────────── profile deltas ──────┤
+  past drafts → selection examples → ranker ←─ preference pairs ┘
 ```
 
 ### 1. Ingest
@@ -61,50 +71,98 @@ ingest → analyze → plan → validate/repair → render/export → feedback
   soft `warnings`, and a suggested `usable_range` that trims bad starts / ends.
   Measures, does not judge taste: tolerance for blur / shake comes later from the
   style profile (`look`) and the planner
-- Near-duplicates: CLIP/SigLIP keyframe embeddings, clustered into `dup_group`
-- Caption: **captioner** role (VLM) on 1–3 keyframes → description, tags, interest 1–5
+- Near-duplicates: CLIP/SigLIP keyframe embeddings, clustered into `dup_group`. Chunks
+  split from one long take share a group without any embedding.
 - Speech: VAD + ASR (Whisper / FunASR) only when speech is present
-- Output: `Shot` records, cached in `workspace/<project>/`
+- Shot kind (planned): `talking` / `broll` from VAD + caption; feeds the structure
+  dimension of the style profile and the planner
+- Caption: **captioner** role (VLM) on 1–3 keyframes → description, tags, interest 1–5.
+  Only for shots that survive quality + dedup; the cache key includes the model name
+- Cut-point candidates (planned): speech pauses, beats of the chosen music, motion
+  minima → `Shot.cut_points`; planners choose in/out among these instead of inventing
+  times or inheriting the equal 10 s split boundaries
+- Output: `Shot` records, cached in `workspace/<project>/`. Per-asset work is
+  independent; `pipeline.py` runs it sequentially today, a thread pool is the easy
+  speed-up
 
 ### 3. Style profile (from references)
-Run the same analysis on reference videos, then aggregate:
+Run shot detection, transitions, VAD and (later) captions on reference videos (quality
+flags are skipped: references are finished edits), then aggregate:
 - Pacing: shot-duration p10/median/p90, cuts per minute, pacing curve (intro vs body)
 - Music: BPM, beat-aligned cut ratio (cut within ±80 ms of a beat), energy curve
-- Structure: intro length, speech ratio
+- Structure ("grammar"): intro length, speech ratio, talking ↔ b-roll alternation
+  (transition counts between shot kinds), montage bursts (runs of short shots), cold
+  open present or not. Pacing alone reads as a speed slider; structure is what makes a
+  cut recognisably someone's.
+- Transitions: share of hard cuts / dissolves / fades (from `analyze/transitions.py`)
+- Audio: speech-over-music ratio, whether clip audio is kept under music
 - Look: brightness / saturation / warmth stats (for later matching)
 - Text: subtitle presence/position/size (OCR; v1.5)
 - `notes`: short natural-language summary written by a VLM
-- Output: `StyleProfile` JSON — versioned and user-editable
+- Output: `StyleProfile` JSON — versioned and user-editable; `vlogcut style show /
+  diff` make it a first-class artefact users can share and compare
 
-### 4. Plan (**planner** role)
-- Input: shot table as text (id, time, duration, caption, tags, quality, interest),
-  `StyleProfile`, user brief ("~3 min, cozy, focus on the café"), variant knobs
-- Output: `EDL`
+### 3b. Learning from past edits (ranker)
+References show only what a creator kept, never what they skipped, so *selection*
+cannot be learned from them. Two sources do carry that signal:
+- The creator's own past JianYing drafts (`import/jianying.py`, planned): a draft
+  names the source files, the chosen in/out points and the order, i.e. a (raw footage
+  → edit) pair. Running analyze on those sources yields chosen vs. skipped shots.
+- Preference pairs from the variant feedback loop (§7).
+
+A small pairwise ranker (gradient-boosted trees or a tiny MLP over quality metrics,
+motion, speech, shot kind and a CLIP embedding; CPU, seconds to train, fully local)
+turns these into a `score(shot)` that plugs into the rules planner and is shown to the
+LLM planner. No end-to-end "video → edit" model: there is no data for it, it is not
+explainable, and it would break principle 2.
+
+### 4. Plan (**planner** role, or rules + ranker)
+- Input: shot table as text (id, time, duration, kind, caption, tags, quality, ranker
+  score, cut-point candidates), `StyleProfile`, user brief ("~3 min, cozy, focus on
+  the café"), variant knobs
+- Output: `EDL`; in/out points are chosen among the shot's cut-point candidates
 - If the shot table is too long: two stages — pick segments, then pick shots per segment
+- `plan/rules.py` (+ ranker) is the no-model baseline and the fallback. The LLM planner
+  becomes the default only once the eval shows it beats that baseline on style distance
+  and blind preference; its distinct value is the brief and narrative ordering.
 
 ### 5. Validate & repair
+- Deterministic post-processing first: snap cut points to the nearest beat within
+  tolerance (needs the chosen music, so it runs after planning and before the checks),
+  audio fades, subtitle timing from ASR
 - Hard checks (code): shot ids exist; in/out inside shot bounds; no rejected shots;
   total duration within ±10 % of target; clip durations within the profile range
-  (with tolerance); no back-to-back clips from the same `dup_group`; chronological order
+  (with tolerance); no back-to-back clips from the same `dup_group`; chronological
+  order, except an optional cold open of at most `StyleProfile.cold_open_clips` clips
+  at the start (a hook from later in the day, then back to the beginning); transition
+  types and audio modes allowed by the profile
 - On failure: structured error list goes back to the planner (max N rounds), then a
   rule-based fallback fix
-- Deterministic post-processing: snap cut points to the nearest beat within
-  tolerance, audio fades, subtitle timing from ASR
 
 ### 6. Render / export
 - Preview mp4 (`render/preview.py`): FFmpeg on proxies (fast, low-res); cached per-clip
-  segments joined losslessly; debug subtitle track with source + reason per clip
+  segments joined losslessly; debug subtitle track with source + reason per clip.
+  Planned: dissolves / fades per `Clip.transition_in`, per-clip audio mode (keep / mute
+  / duck under music)
+- Interchange: an OpenTimelineIO timeline is the canonical export; JianYing and FCPXML
+  are exporters from it, so a change in one app's format never reaches the planner
 - JianYing draft: `pyJianYingDraft` (generation only; final export happens in the
-  JianYing desktop app)
+  JianYing desktop app). Risk: undocumented format, and newer JianYing versions
+  reportedly encrypt drafts → verify with a one-day spike (a two-clip draft opened in
+  JianYing) before building on it
 - FCPXML for Premiere / Resolve / FCP (later)
 
 ### 7. Variants & feedback
 - Variants = different knob settings: pacing ±, selection strategy
-  (highlights vs. coverage), music choice
-- Feedback (pick / reject / free text) → **feedback** role turns text into
-  validated `StyleProfile` deltas
-- Every (context, variant A, variant B, choice) is logged as a preference pair →
-  later: reward model / preference optimization
+  (highlights vs. coverage), music choice, cold open on / off
+- Presentation: the CLI writes a local HTML page with the previews side by side and
+  pick / reject buttons that save a feedback JSON (no server)
+- Feedback (pick / reject / free text) → **feedback** role first *classifies* it:
+  "the café part was too short" is about this edit and becomes a re-plan constraint;
+  "too fast overall" is about style and becomes a validated `StyleProfile` delta.
+  Mixing the two would drift the profile.
+- Every (context, variant A, variant B, choice) is logged as a preference pair and
+  feeds the ranker (§3b)
 
 ## Data contracts
 
@@ -119,6 +177,21 @@ Defined in `src/vlogcut/schemas.py`:
 
 Changing a schema means updating this file and the tests in the same change.
 
+Planned additions (not yet in `schemas.py`; each lands with the module that needs it):
+
+| Field / model | Why |
+|---|---|
+| `Clip.transition_in` (cut / dissolve / fade + duration) | references' transitions are measured but cannot be reproduced |
+| `Clip.audio` (keep / mute / duck) | how voice sits under music is part of a style |
+| `MusicCue.end_s`, ducking params | music mixing needs an end and a level under speech |
+| `Shot.kind` (talking / broll), `Shot.cut_points` | structure dimension; code-proposed in/out candidates |
+| `StyleProfile.structure`, `.transitions`, `.cold_open_clips` | the "grammar" dimensions |
+| `Run` manifest (inputs fingerprint → outputs) | EDL file names collide once profile version, brief, variant and model all vary |
+| `Feedback`, `PreferencePair` | the flywheel must be logged from the first real use |
+
+Cached JSON should store paths relative to the workspace so a moved workspace stays
+valid (today they are absolute).
+
 ## Model roles
 
 | Role | Job | Call volume | Typical choice |
@@ -130,7 +203,9 @@ Changing a schema means updating this file and the tests in the same change.
 
 All roles go through `vlogcut.llm.router.ModelRouter`; any OpenAI-compatible
 endpoint works (local servers, OpenAI, DeepSeek, Qwen/DashScope, OpenRouter …).
-Privacy mode (later): only text descriptions leave the machine, never footage.
+Privacy mode (later): only text descriptions leave the machine, never footage. The
+captioner sees keyframes, so privacy mode pins `captioner` to a local provider and the
+router refuses a remote one.
 
 ## Directory layout
 
@@ -139,6 +214,9 @@ src/vlogcut/
   schemas.py        data contracts
   llm/router.py     the only place that talks to models
   ingest/  analyze/  style/  plan/  validate/  render/  feedback/
+  import/           past JianYing drafts → selection examples
+  learn/            ranker training (optional, tiny, CPU)
+  export/           OTIO timeline → JianYing draft / FCPXML
   cli.py
 tests/              offline tests; tiny fixtures only
 eval/               benchmark sets, metrics, results
@@ -150,9 +228,35 @@ workspace/          per-project cache (gitignored)
 | Week | Deliverable |
 |---|---|
 | 1 | ingest + analyze (no LLM); rule-based chronological rough cut; FFmpeg preview |
-| 2 | style profile + beat sync; different references visibly change pacing |
-| 3 | captioner + planner + validate/repair loop |
-| 4 | JianYing export, variants, README + demo video |
+| 2 | **PoC**: style profile from references + `cut --style`; round-trip eval; JianYing draft spike |
+| 3 | structure dimension; cut-point candidates; transitions + audio modes in EDL and preview; beat sync |
+| 4 | draft import + ranker; captioner; planner + validate/repair loop, measured against rules + ranker |
+| 5 | OTIO + JianYing export; variants page + feedback; README + demo video |
+
+Revised 2026-10-14 after the week-1 review: the PoC and the eval move first because
+"references visibly change the cut" is the hypothesis everything else depends on; the
+JianYing spike moves up because its format is the biggest external risk; the LLM planner
+moves after the ranker so it is measured against a real baseline.
+
+### PoC (week 2): cut unrelated footage in creator X's style
+
+Goal: show that a profile extracted from someone's published vlogs changes a cut of
+unrelated footage in a way viewers recognise. Protocol:
+- References: two published vlogs each from two creators with opposite pacing (one
+  fast-cut, one slow / cinematic). Analysed locally only; never committed or
+  redistributed.
+- Footage: 30–60 min shot on a phone over one day, the realistic input. Public *raw*
+  vlog footage is rare; stock clips (Pexels / Pixabay, CC0) are a fallback but are
+  already-edited short clips, so they exercise little of ingest / quality / coverage.
+- Runs: the same footage cut with the default pacing and with each creator's profile.
+- Pass: (a) round-trip style distance (profile of the output vs. the reference profile)
+  is well below the distance between the two creators; (b) in a blind test, viewers
+  match each cut to its creator at ≥ 80 %.
+- Code needed: `style/profile.py` (shot detection + transitions on references →
+  `StyleProfile`), `cut --style <json>`, `eval/style_distance.py`. Everything else
+  exists; the rules planner already takes a profile.
+- Known limit: with pacing and transitions only, the PoC shows rhythm, not selection or
+  structure; those come in weeks 3–4.
 
 ### Progress
 
@@ -166,11 +270,15 @@ workspace/          per-project cache (gitignored)
 
 Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 
-## Evaluation (start in week 1)
+## Evaluation (starts with the PoC; `eval/` does not exist yet)
 
+- Round-trip test (offline, synthetic footage): reference → profile → cut → profile of
+  the cut; the distance must be small. This is the first eval and doubles as a unit test.
 - ~10 footage sets, each with reference videos
-- Metrics: style distance (shot-duration distribution distance, beat-alignment gap),
-  constraint violations, repair rounds, cost and latency per video, blind human preference
+- Metrics: style distance (shot-duration distribution distance, beat-alignment gap,
+  structure / transition-mix distance), constraint violations, repair rounds, cost and
+  latency per video, blind human preference
+- Baseline comparison: rules + ranker vs. LLM planner on the same sets
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
@@ -270,12 +378,25 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   pacing first: when target / median gives fewer slots than recordings, it spreads
   over the day instead of shortening every clip.
 
+- 2026-10-14: week-1 review → design changes (schemas unchanged until each module
+  lands): EDL gains transitions and per-clip audio modes; chronological order allows an
+  optional cold open; the style profile gains structure / transitions / audio
+  dimensions; cut points are code-proposed candidates that planners choose among;
+  feedback is classified (this edit vs. style) before it touches the profile; OTIO is
+  the canonical export with JianYing and FCPXML as exporters; a run manifest replaces
+  name-based EDL files; a learned ranker trained on the creator's own drafts and
+  preference pairs is the only learned component and plugs in as `score`. Milestones
+  re-ordered: PoC + eval + JianYing spike first (week 2), LLM planner after the ranker.
 ## Open questions
 
 - How many variants per run
-- How to present variants for comparison (side-by-side preview page?)
+- JianYing draft format: does the installed version encrypt drafts? (spike, week 2)
+- PoC inputs: own phone footage vs. stock clips; which two creators as references
+- Where music analysis (BPM, beat times) lives: a `MusicTrack` record next to assets?
+- Learned ranker: how many drafts / preference pairs before it beats the quality-only
+  score
 - Privacy mode details
-- Music: auto-pick / beat-match from a user's own library (week 2), and whether
+- Music: auto-pick / beat-match from a user's own library (week 3), and whether
   voice cloning for narration (user's own voice, local, explicit consent) belongs in a
   post-v1 plugin
 - Quality thresholds: calibrate on a real phone-footage eval set; per-project relative
