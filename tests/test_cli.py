@@ -7,7 +7,7 @@ import pytest
 
 from vlogcut import cli
 from vlogcut.pipeline import find_footage
-from vlogcut.schemas import StyleProfile
+from vlogcut.schemas import DurationStats, StyleProfile
 
 
 def test_find_footage_filters_and_sorts(tmp_path):
@@ -22,6 +22,7 @@ def test_parser_defaults():
     args = cli.build_parser().parse_args(["cut", "day1"])
     assert (args.target, args.strategy, args.background) == (180.0, "coverage", "black")
     assert not args.no_subtitles and not args.no_render
+    assert args.style is None and args.music is None
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["cut", "day1", "--strategy", "random"])
 
@@ -34,6 +35,13 @@ def test_cli_errors_are_one_line_and_exit_1(tmp_path, capsys):
     (tmp_path / "x.mp4").write_bytes(b"x")
     assert cli.main(["cut", str(tmp_path), "--music", str(tmp_path / "nope.mp3")]) == 1
     assert "music file not found" in capsys.readouterr().err
+    assert cli.main(["cut", str(tmp_path), "--style", str(tmp_path / "nope.json")]) == 1
+    assert "style profile not found" in capsys.readouterr().err
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"cuts_per_min": -1}', encoding="utf-8")
+    assert cli.main(["cut", str(tmp_path), "--style", str(bad), "-w", str(tmp_path / "ws")]) == 1
+    err = capsys.readouterr().err
+    assert "invalid style profile" in err and err.count("\n") == 1
 
 
 @pytest.mark.ffmpeg
@@ -75,6 +83,21 @@ def test_cut_end_to_end(make_clip, tmp_path, capsys, monkeypatch):
     assert (ws / "edl" / "coverage_4s.json").is_file()
     assert not (ws / "preview_coverage_4s.mp4").exists()
 
+    # a style profile changes the pacing and gets its own output name; still no re-analysis
+    fast = tmp_path / "fast.json"
+    pacing = DurationStats(p10=0.5, median=1.0, p90=1.5)
+    fast.write_text(
+        StyleProfile(shot_duration_s=pacing, cuts_per_min=60).model_dump_json(), encoding="utf-8"
+    )
+    argv = ["cut", str(day), "-t", "4", "-w", str(ws), "--no-render", "--style", str(fast)]
+    assert cli.main(argv) == 0
+    assert "style     fast.json" in capsys.readouterr().out
+    plain = json.loads((ws / "edl" / "coverage_4s.json").read_text(encoding="utf-8"))
+    styled = json.loads((ws / "edl" / "coverage_4s_fast.json").read_text(encoding="utf-8"))
+    assert len(styled["clips"]) > len(plain["clips"])
+    assert all(c["out_s"] - c["in_s"] <= 1.5 + 1e-6 for c in styled["clips"])
+    assert "style fast.json" in styled["notes"]
+
 
 # ---------------------------------------------------------------------------
 # vlogcut style
@@ -82,18 +105,52 @@ def test_cut_end_to_end(make_clip, tmp_path, capsys, monkeypatch):
 
 
 def test_style_parser_defaults():
-    args = cli.build_parser().parse_args(["style", "a.mp4", "b.mp4"])
+    args = cli.build_parser().parse_args(["style", "build", "a.mp4", "b.mp4"])
     assert args.refs == [Path("a.mp4"), Path("b.mp4")]
     assert args.out == Path("profile.json")
-    with pytest.raises(SystemExit):
-        cli.build_parser().parse_args(["style"])  # at least one reference
+    diff = cli.build_parser().parse_args(["style", "diff", "a.json", "b.json"])
+    assert (diff.style_command, diff.a, diff.b) == ("diff", Path("a.json"), Path("b.json"))
+    for argv in (["style"], ["style", "build"], ["style", "show"], ["style", "diff", "a.json"]):
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args(argv)
 
 
 def test_style_missing_reference_is_a_one_line_error(tmp_path, capsys):
     missing = tmp_path / "nope.mp4"
-    assert cli.main(["style", str(missing), "-w", str(tmp_path / "ws")]) == 1
+    assert cli.main(["style", "build", str(missing), "-w", str(tmp_path / "ws")]) == 1
     err = capsys.readouterr().err
     assert "reference not found" in err and err.count("\n") == 1
+
+
+def _write_profile(path: Path, p10: float, median: float, p90: float, cpm: float) -> Path:
+    stats = DurationStats(p10=p10, median=median, p90=p90)
+    profile = StyleProfile(shot_duration_s=stats, cuts_per_min=cpm, notes="handmade")
+    path.write_text(profile.model_dump_json(), encoding="utf-8")
+    return path
+
+
+def test_style_show_and_diff(tmp_path, capsys):
+    fast = _write_profile(tmp_path / "fast.json", 0.6, 1.8, 5.2, 28.8)
+    slow = _write_profile(tmp_path / "slow.json", 2.1, 3.4, 9.3, 9.0)
+    assert cli.main(["style", "show", str(fast)]) == 0
+    out = capsys.readouterr().out
+    assert "handmade" in out and "cuts/min" in out and "28.80" in out
+    assert cli.main(["style", "diff", str(fast), str(slow)]) == 0
+    out = capsys.readouterr().out
+    assert "octaves" in out and "fast.json" in out and "slow.json" in out
+    for dim in ("p10", "median", "p90", "cuts/min"):
+        assert dim in out
+
+
+def test_style_show_and_diff_errors_are_one_line(tmp_path, capsys):
+    good = _write_profile(tmp_path / "good.json", 1.0, 2.0, 4.0, 20.0)
+    assert cli.main(["style", "show", str(tmp_path / "nope.json")]) == 1
+    assert "profile not found" in capsys.readouterr().err
+    bad = tmp_path / "bad.json"
+    bad.write_text("{", encoding="utf-8")
+    assert cli.main(["style", "diff", str(good), str(bad)]) == 1
+    err = capsys.readouterr().err
+    assert "invalid style profile" in err and err.count("\n") == 1
 
 
 @pytest.mark.ffmpeg
@@ -101,7 +158,8 @@ def test_style_missing_reference_is_a_one_line_error(tmp_path, capsys):
 def test_style_end_to_end(make_edited_clip, tmp_path, capsys):
     ref = make_edited_clip("ref.mp4", shot_lengths=[1.0, 2.0, 1.0])
     out = tmp_path / "p.json"
-    assert cli.main(["style", str(ref), "-o", str(out), "-w", str(tmp_path / "ws")]) == 0
+    argv = ["style", "build", str(ref), "-o", str(out), "-w", str(tmp_path / "ws")]
+    assert cli.main(argv) == 0
     text = capsys.readouterr().out
     assert "1 reference," in text and str(out) in text
     profile = StyleProfile.model_validate_json(out.read_text(encoding="utf-8"))

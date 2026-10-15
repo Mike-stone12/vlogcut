@@ -99,8 +99,8 @@ flags are skipped: references are finished edits), then aggregate:
 - Look: brightness / saturation / warmth stats (for later matching)
 - Text: subtitle presence/position/size (OCR; v1.5)
 - `notes`: short natural-language summary written by a VLM
-- Output: `StyleProfile` JSON — versioned and user-editable; `vlogcut style show /
-  diff` make it a first-class artefact users can share and compare
+- Output: `StyleProfile` JSON — versioned and user-editable (`vlogcut style build`);
+  `vlogcut style show / diff` make it a first-class artefact users can share and compare
 
 ### 3b. Learning from past edits (ranker)
 References show only what a creator kept, never what they skipped, so *selection*
@@ -255,9 +255,9 @@ unrelated footage in a way viewers recognise. Protocol:
 - Pass: (a) round-trip style distance (profile of the output vs. the reference profile)
   is well below the distance between the two creators; (b) in a blind test, viewers
   match each cut to its creator at ≥ 80 %.
-- Code needed: `style/profile.py` (shot detection + transitions on references →
-  `StyleProfile`), `cut --style <json>`, `eval/style_distance.py`. Everything else
-  exists; the rules planner already takes a profile.
+- Code: `style/profile.py` (shot detection + transitions on references →
+  `StyleProfile`), `cut --style <json>`, `style/distance.py` + `vlogcut style diff`. All
+  in place as of 2026-10-14; what remains is running it on real references and footage.
 - Known limit: with pacing and transitions only, the PoC shows rhythm, not selection or
   structure; those come in weeks 3–4.
 
@@ -271,14 +271,26 @@ unrelated footage in a way viewers recognise. Protocol:
 - [x] Week 1 · FFmpeg preview render (`render/preview.py`)
 - [x] Week 1 · CLI: footage folder → preview in one command (`cli.py`, `pipeline.py`)
 - [x] Week 2 · style: pacing profile from reference videos (`style/profile.py`,
-      `vlogcut style`)
+      `vlogcut style build`)
+- [x] Week 2 · `vlogcut cut --style <profile.json>`: the rules planner paces from a
+      profile (`pipeline.py`)
+- [x] Week 2 · style distance + round-trip eval (`style/distance.py`,
+      `vlogcut style show / diff`, `tests/test_style_distance.py`)
 
 Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 
 ## Evaluation (starts with the PoC; `eval/` does not exist yet)
 
 - Round-trip test (offline, synthetic footage): reference → profile → cut → profile of
-  the cut; the distance must be small. This is the first eval and doubles as a unit test.
+  the cut; the distance must be small. This is the first eval and doubles as a unit test:
+  `tests/test_style_distance.py` cuts generated footage with a fast and a slow reference
+  profile and requires the round trip (via the EDL and via the rendered preview) to land
+  within a third of the distance between the two references.
+- Style distance (`style/distance.py`): per dimension |log2(a / b)| for the positive
+  pacing quantities (shot-duration p10 / median / p90, cuts per minute), so the unit is
+  octaves (1.0 = twice as fast or slow); absolute difference for the ratio dimensions in
+  [0, 1]; a dimension unmeasured on either side is skipped and reported; equal weights
+  until the eval set says otherwise. `vlogcut style diff a.json b.json` prints it.
 - ~10 footage sets, each with reference videos
 - Metrics: style distance (shot-duration distribution distance, beat-alignment gap,
   structure / transition-mix distance), constraint violations, repair rounds, cost and
@@ -406,6 +418,32 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   proxies. Known gaps: `transitions.load_frames` decodes the whole proxy at 15 fps,
   64×64 float32 (≈ 440 MB for a 30 min reference), fine for 5–15 min PoC references;
   intro length, structure, transitions and look are not measured yet.
+- 2026-10-14: `cut --style <profile.json>` — the profile is read and validated before
+  any analysis, so a bad file fails in milliseconds, not after minutes of proxies; only
+  the rules planner reads it (pacing p10 / median / p90). Outputs carry the profile's
+  file stem as a suffix (`edl/coverage_180s_fast.json`, `preview_coverage_180s_fast.mp4`)
+  so cuts with and without a style sit side by side in one workspace until the run
+  manifest replaces name-based outputs. The EDL `notes` record the profile summary, so
+  an EDL says what paced it.
+- 2026-10-14: style distance + round-trip eval — `style/distance.py`, no model, no numpy.
+  Pacing dimensions are positive ratio quantities, so each is compared as |log2(a / b)|
+  and the unit is octaves (1.0 = twice as fast or slow); the ratio dimensions in [0, 1]
+  (`beat_aligned_ratio`, `speech_ratio`) use the absolute difference; a dimension that is
+  `None` on either side is skipped and listed in `StyleDistance.unmeasured`; equal
+  weights until the eval set says otherwise (cuts per minute is not independent of the
+  duration distribution, so pacing counts about twice). `StyleDistance` is an analysis
+  result, not a cross-module contract, so it stays out of `schemas.py`. Two ways to
+  profile a cut: `profile_from_edl` (clip timeline durations; exact, no render, no
+  detection; what the unit test uses) and `style build` on the rendered preview (the
+  path users take; also checks the detector's recall on our own output). CLI: `vlogcut
+  style` became `style build | show | diff`, since argparse cannot mix positional
+  references with subcommands and the interface was unreleased. The round-trip bar is
+  relative (under a third of the fast-vs-slow reference distance), not absolute: the
+  rules planner gives all clips nearly one length (one shared offset), so the output's
+  p10 is always above and its p90 always below the reference's and even a perfect run
+  measures ≈ 0.3 octaves. Known gap: sampling clip lengths from the reference
+  distribution is the next planner change. No `eval/` directory yet: the first eval
+  doubles as a unit test; real-footage protocols and results live in the private notes.
 
 ## Open questions
 
