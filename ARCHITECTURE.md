@@ -177,6 +177,9 @@ Defined in `src/vlogcut/schemas.py`:
 
 Changing a schema means updating this file and the tests in the same change.
 
+`StyleProfile.beat_aligned_ratio` and `speech_ratio` are `None` until the beat / speech
+analysis exists: `None` means "not measured", which is not the same as 0.
+
 Planned additions (not yet in `schemas.py`; each lands with the module that needs it):
 
 | Field / model | Why |
@@ -267,6 +270,8 @@ unrelated footage in a way viewers recognise. Protocol:
 - [x] Week 1 · rule-based chronological rough cut (`plan/rules.py`)
 - [x] Week 1 · FFmpeg preview render (`render/preview.py`)
 - [x] Week 1 · CLI: footage folder → preview in one command (`cli.py`, `pipeline.py`)
+- [x] Week 2 · style: pacing profile from reference videos (`style/profile.py`,
+      `vlogcut style`)
 
 Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 
@@ -387,6 +392,21 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   name-based EDL files; a learned ranker trained on the creator's own drafts and
   preference pairs is the only learned component and plugs in as `score`. Milestones
   re-ordered: PoC + eval + JianYing spike first (week 2), LLM planner after the ranker.
+- 2026-10-14: style profile, PoC slice — references are finished edits, so
+  `style/profile.py` calls the cut detectors directly (`shots.detect_cuts` +
+  `transitions`) and skips `detect_shots`: no `split_long` (a 30 s shot *is* the style)
+  and no keyframes. `min_shot_s` is 0.25 s (footage uses 0.5): 0.3 s montage shots are
+  real in fast edits. Raw cut times are cached at `<workspace>/style/<asset_id>.cuts.json`
+  keyed by asset fingerprint + `ReferenceParams`; aggregation is pure. Several references
+  pool their shot durations and `cuts_per_min = total cuts / total minutes`, not a mean
+  of per-video rates. **Schema change**: `StyleProfile.beat_aligned_ratio` and
+  `speech_ratio` become `float | None = None` (not measured yet). `notes` holds a
+  deterministic one-line summary until a VLM writes one. `vlogcut style <refs> -o
+  profile.json` caches under `workspace/references` by default so profiles share
+  proxies. Known gaps: `transitions.load_frames` decodes the whole proxy at 15 fps,
+  64×64 float32 (≈ 440 MB for a 30 min reference), fine for 5–15 min PoC references;
+  intro length, structure, transitions and look are not measured yet.
+
 ## Open questions
 
 - How many variants per run

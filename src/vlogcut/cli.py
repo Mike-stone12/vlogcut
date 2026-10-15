@@ -1,6 +1,7 @@
-"""Command line: `vlogcut cut <footage folder>` -> rough-cut preview.
+"""Command line: `vlogcut cut <footage folder>` -> rough-cut preview,
+`vlogcut style <reference videos>` -> style profile JSON.
 
-Thin wrapper over `vlogcut.pipeline`; argument parsing and messages only.
+Thin wrapper over `vlogcut.pipeline` / `vlogcut.style`; argument parsing and messages only.
 """
 
 from __future__ import annotations
@@ -36,6 +37,15 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--no-subtitles", action="store_true", help="no debug subtitle track")
     c.add_argument("--no-render", action="store_true", help="plan only, write the EDL")
     c.add_argument("-v", "--verbose", action="store_true")
+
+    s = sub.add_parser("style", help="extract a style profile from finished reference videos")
+    s.add_argument("refs", type=Path, nargs="+", help="videos in the style to learn")
+    s.add_argument("-o", "--out", type=Path, default=Path("profile.json"), help="profile JSON")
+    s.add_argument(
+        "-w", "--workspace", type=Path, default=Path("workspace") / "references",
+        help="cache dir for reference proxies and cuts (default workspace/references)",
+    )  # fmt: skip
+    s.add_argument("-v", "--verbose", action="store_true")
     return parser
 
 
@@ -47,7 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if not args.verbose:
         _quiet_scenedetect()
-    return _cut(args)
+    return _cut(args) if args.command == "cut" else _style(args)
 
 
 def _cut(args: argparse.Namespace) -> int:
@@ -87,6 +97,36 @@ def _cut(args: argparse.Namespace) -> int:
     print(f"edl       {result.edl_path}")
     if result.preview_path:
         print(f"preview   {result.preview_path}")
+    print(f"done in {time.perf_counter() - started:.1f} s")
+    return 0
+
+
+def _style(args: argparse.Namespace) -> int:
+    from vlogcut.analyze.shots import ShotDetectionError
+    from vlogcut.ingest import FFmpegError, FFmpegNotFoundError, ProbeError, ProxyError
+    from vlogcut.style import StyleError, build_profile
+
+    for ref in args.refs:
+        if not ref.is_file():
+            return _fail(f"reference not found: {ref}")
+    started = time.perf_counter()
+    try:
+        profile = build_profile(
+            args.refs, args.workspace, progress=lambda msg: print(msg, file=sys.stderr)
+        )
+    except FFmpegNotFoundError as exc:
+        return _fail(str(exc))
+    except ImportError as exc:
+        return _fail(f'{exc}; install the analysis extra: pip install -e ".[analyze]"')
+    except (ProbeError, StyleError, ShotDetectionError) as exc:
+        return _fail(str(exc))
+    except (ProxyError, FFmpegError) as exc:
+        return _fail(f"ffmpeg failed: {exc}")
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(profile.model_dump_json(indent=1), encoding="utf-8")
+    print(f"style     {profile.notes}")
+    print(f"profile   {args.out}")
     print(f"done in {time.perf_counter() - started:.1f} s")
     return 0
 

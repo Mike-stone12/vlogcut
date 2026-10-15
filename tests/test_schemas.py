@@ -43,3 +43,11 @@ def test_style_profile_duration_stats_ordered():
         beat_aligned_ratio=0.7,
     )
     assert profile.version == 1
+
+
+def test_style_profile_unmeasured_ratios_are_none():
+    stats = DurationStats(p10=1.0, median=2.0, p90=4.0)
+    profile = StyleProfile(shot_duration_s=stats, cuts_per_min=20)
+    assert profile.beat_aligned_ratio is None and profile.speech_ratio is None
+    with pytest.raises(ValidationError):
+        StyleProfile(shot_duration_s=stats, cuts_per_min=20, speech_ratio=1.5)

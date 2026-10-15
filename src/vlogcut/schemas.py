@@ -118,10 +118,10 @@ class StyleProfile(BaseModel):
     source_refs: list[str] = Field(default_factory=list)
     shot_duration_s: DurationStats
     cuts_per_min: float = Field(gt=0)
-    beat_aligned_ratio: float = Field(ge=0, le=1)
+    beat_aligned_ratio: float | None = Field(default=None, ge=0, le=1)  # None = not measured
     bpm_range: tuple[float, float] | None = None
     intro_s: float | None = None
-    speech_ratio: float = Field(default=0.0, ge=0, le=1)
+    speech_ratio: float | None = Field(default=None, ge=0, le=1)  # None = not measured
     look: dict[str, float] = Field(default_factory=dict)  # brightness, saturation, warmth...
     subtitle: SubtitleStyle = Field(default_factory=SubtitleStyle)
     notes: str = ""  # short natural-language summary

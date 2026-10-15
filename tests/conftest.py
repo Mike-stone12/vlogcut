@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +83,39 @@ def make_clip(tmp_path: Path) -> Callable[..., Path]:
             + ["-c", "copy", "-map_metadata", "0", "-movflags", "+use_metadata_tags", str(out)],
         )
         raw.unlink()
+        return out
+
+    return make
+
+
+# deterministic lavfi sources that look nothing alike, so every boundary is a hard cut
+LAVFI_SOURCES = ("testsrc2", "mandelbrot", "smptehdbars", "rgbtestsrc", "yuvtestsrc")
+
+
+@pytest.fixture
+def make_edited_clip(tmp_path: Path) -> Callable[..., Path]:
+    """Generate a finished-looking clip: shots of the given lengths hard-cut together.
+
+    Consecutive shots come from different sources, so the cut times are exactly the
+    cumulative sums of `shot_lengths`. No audio.
+    """
+
+    def make(
+        name: str = "edited.mp4",
+        *,
+        shot_lengths: Sequence[float],
+        size: str = "320x240",
+        fps: int = 30,
+    ) -> Path:
+        out = tmp_path / name
+        args = ["-v", "error", "-y"]
+        for i, length in enumerate(shot_lengths):
+            src = LAVFI_SOURCES[i % len(LAVFI_SOURCES)]
+            args += ["-f", "lavfi", "-i", f"{src}=size={size}:rate={fps},trim=duration={length}"]
+        inputs = "".join(f"[{i}]" for i in range(len(shot_lengths)))
+        args += ["-filter_complex", f"{inputs}concat=n={len(shot_lengths)}:v=1:a=0"]
+        args += ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(out)]
+        ffmpeg.run("ffmpeg", args)
         return out
 
     return make
