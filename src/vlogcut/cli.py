@@ -29,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("folder", type=Path, help="folder with the day's clips (not recursive)")
     c.add_argument("-t", "--target", type=float, default=180.0, help="target length, s")
     c.add_argument("-s", "--strategy", choices=["coverage", "highlights"], default="coverage")
+    c.add_argument("--style", type=Path, help="style profile JSON from `vlogcut style`")
     c.add_argument("-w", "--workspace", type=Path, help="cache dir (default ./workspace/<folder>)")
     c.add_argument("-o", "--out", type=Path, help="preview path (default inside the workspace)")
     c.add_argument("--music", type=Path, help="background music file (your own)")
@@ -66,15 +67,18 @@ def _cut(args: argparse.Namespace) -> int:
     from vlogcut.pipeline import cut
     from vlogcut.plan import RoughCutError
     from vlogcut.render import RenderError
+    from vlogcut.style import StyleError
 
     if args.music is not None and not args.music.is_file():
         return _fail(f"music file not found: {args.music}")
+    if args.style is not None and not args.style.is_file():
+        return _fail(f"style profile not found: {args.style}")
     workspace = args.workspace or Path("workspace") / args.folder.resolve().name
     started = time.perf_counter()
     try:
         result = cut(
             args.folder, workspace,
-            target_s=args.target, strategy=args.strategy, music=args.music,
+            target_s=args.target, strategy=args.strategy, style=args.style, music=args.music,
             music_gain_db=args.music_gain, out=args.out, render=not args.no_render,
             preview_params={"background": args.background, "subtitles": not args.no_subtitles},
             progress=lambda msg: print(msg, file=sys.stderr),
@@ -83,7 +87,7 @@ def _cut(args: argparse.Namespace) -> int:
         return _fail(str(exc))
     except ImportError as exc:
         return _fail(f'{exc}; install the analysis extra: pip install -e ".[analyze]"')
-    except (FileNotFoundError, RoughCutError, ShotDetectionError) as exc:
+    except (FileNotFoundError, RoughCutError, ShotDetectionError, StyleError) as exc:
         return _fail(str(exc))
     except (ProxyError, RenderError, FFmpegError) as exc:
         return _fail(f"ffmpeg failed: {exc}")
@@ -93,6 +97,8 @@ def _cut(args: argparse.Namespace) -> int:
     for name, why in result.skipped:
         print(f"skipped   {name}: {why}")
     print(f"shots     {len(result.shots)} ({len(result.shots) - usable} rejected)")
+    if result.profile is not None:
+        print(f"style     {args.style.name}: {result.profile.notes}")
     print(f"cut       {len(result.edl.clips)} clips, {result.edl.total_duration_s:.1f} s")
     print(f"edl       {result.edl_path}")
     if result.preview_path:

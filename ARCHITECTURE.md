@@ -272,6 +272,8 @@ unrelated footage in a way viewers recognise. Protocol:
 - [x] Week 1 · CLI: footage folder → preview in one command (`cli.py`, `pipeline.py`)
 - [x] Week 2 · style: pacing profile from reference videos (`style/profile.py`,
       `vlogcut style`)
+- [x] Week 2 · `vlogcut cut --style <profile.json>`: the rules planner paces from a
+      profile (`pipeline.py`)
 
 Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 
@@ -406,6 +408,13 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   proxies. Known gaps: `transitions.load_frames` decodes the whole proxy at 15 fps,
   64×64 float32 (≈ 440 MB for a 30 min reference), fine for 5–15 min PoC references;
   intro length, structure, transitions and look are not measured yet.
+- 2026-10-14: `cut --style <profile.json>` — the profile is read and validated before
+  any analysis, so a bad file fails in milliseconds, not after minutes of proxies; only
+  the rules planner reads it (pacing p10 / median / p90). Outputs carry the profile's
+  file stem as a suffix (`edl/coverage_180s_fast.json`, `preview_coverage_180s_fast.mp4`)
+  so cuts with and without a style sit side by side in one workspace until the run
+  manifest replaces name-based outputs. The EDL `notes` record the profile summary, so
+  an EDL says what paced it.
 
 ## Open questions
 

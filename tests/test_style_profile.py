@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from vlogcut.analyze import shots as shots_mod
-from vlogcut.style import ReferenceParams, StyleError, build_profile
+from vlogcut.style import ReferenceParams, StyleError, build_profile, load_profile
 from vlogcut.style.profile import (
     ReferenceCuts,
     aggregate,
@@ -57,6 +57,20 @@ def test_aggregate_pools_shots_and_rates_by_total_time():
 def test_aggregate_without_references_raises():
     with pytest.raises(StyleError, match="reference"):
         aggregate([], ReferenceParams())
+
+
+def test_load_profile_round_trips_and_rejects_bad_files(tmp_path):
+    profile = aggregate([_ref("a", 60.0, [10.0, 20.0, 30.0])], ReferenceParams())
+    path = tmp_path / "p.json"
+    path.write_text(profile.model_dump_json(indent=1), encoding="utf-8")
+    assert load_profile(path) == profile
+    path.write_text("{not json", encoding="utf-8")
+    with pytest.raises(StyleError, match="invalid style profile"):
+        load_profile(path)
+    path.write_text('{"cuts_per_min": 0}', encoding="utf-8")
+    with pytest.raises(StyleError, match="shot_duration_s") as info:
+        load_profile(path)
+    assert "\n" not in str(info.value)  # one line, so the CLI can print it as is
 
 
 # ---------------------------------------------------------------------------

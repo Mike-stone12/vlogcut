@@ -1,7 +1,8 @@
 """Footage folder -> proxies -> shots -> quality -> rough cut -> preview.
 
 The steps every front end (CLI now, UI later) shares. Each stage caches in the
-workspace, so re-running with another target or strategy only re-plans and re-renders.
+workspace, so re-running with another target, strategy or style profile only re-plans
+and re-renders.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from vlogcut.ingest import ProbeError, make_proxy, probe_asset
-from vlogcut.schemas import EDL, MediaAsset, MusicCue, Shot
+from vlogcut.schemas import EDL, MediaAsset, MusicCue, Shot, StyleProfile
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ class CutResult(BaseModel):
     edl: EDL
     edl_path: Path
     preview_path: Path | None
+    profile: StyleProfile | None = None  # the style the cut was paced with, if any
 
 
 def find_footage(folder: str | Path) -> list[Path]:
@@ -74,6 +76,7 @@ def cut(
     *,
     target_s: float = 180.0,
     strategy: str = "coverage",
+    style: Path | None = None,
     music: Path | None = None,
     music_gain_db: float = -14.0,
     out: Path | None = None,
@@ -83,8 +86,11 @@ def cut(
 ) -> CutResult:
     from vlogcut.plan import RoughCutParams, rough_cut
     from vlogcut.render import PreviewParams, render_preview
+    from vlogcut.style import load_profile
 
     workspace = Path(workspace)
+    # read the profile first: a bad file should fail before minutes of analysis
+    profile = load_profile(style) if style is not None else None
     files = find_footage(folder)
     if not files:
         raise FileNotFoundError(f"no video files in {folder}")
@@ -93,11 +99,16 @@ def cut(
         raise FileNotFoundError(f"none of the {len(files)} files in {folder} is usable footage")
     shots = analyze(assets, workspace, progress)
 
-    progress(f"plan {strategy}, target {target_s:.0f} s")
-    edl = rough_cut(shots, assets, RoughCutParams(target_s=target_s, strategy=strategy))
+    progress(
+        f"plan {strategy}, target {target_s:.0f} s" + (f", style {style.name}" if style else "")
+    )
+    edl = rough_cut(shots, assets, RoughCutParams(target_s=target_s, strategy=strategy), profile)
+    if style is not None and profile is not None:
+        edl.notes += f"; style {style.name}: {profile.notes}"  # an EDL says what paced it
     if music is not None:
         edl.music = [MusicCue(track_id="music", gain_db=music_gain_db)]
-    name = f"{strategy}_{target_s:.0f}s"
+    # outputs with and without a style sit side by side (the run manifest replaces this)
+    name = f"{strategy}_{target_s:.0f}s" + (f"_{style.stem}" if style else "")
     edl_path = workspace / "edl" / f"{name}.json"
     edl_path.parent.mkdir(parents=True, exist_ok=True)
     edl_path.write_text(edl.model_dump_json(indent=1), encoding="utf-8")
@@ -118,5 +129,5 @@ def cut(
         )  # fmt: skip
     return CutResult(
         assets=assets, skipped=skipped, shots=shots, edl=edl, edl_path=edl_path,
-        preview_path=preview,
+        preview_path=preview, profile=profile,
     )  # fmt: skip
