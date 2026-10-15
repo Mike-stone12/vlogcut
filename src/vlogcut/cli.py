@@ -1,5 +1,5 @@
 """Command line: `vlogcut cut <footage folder>` -> rough-cut preview,
-`vlogcut style <reference videos>` -> style profile JSON.
+`vlogcut style build <reference videos>` -> style profile JSON, `style show / diff`.
 
 Thin wrapper over `vlogcut.pipeline` / `vlogcut.style`; argument parsing and messages only.
 """
@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("folder", type=Path, help="folder with the day's clips (not recursive)")
     c.add_argument("-t", "--target", type=float, default=180.0, help="target length, s")
     c.add_argument("-s", "--strategy", choices=["coverage", "highlights"], default="coverage")
-    c.add_argument("--style", type=Path, help="style profile JSON from `vlogcut style`")
+    c.add_argument("--style", type=Path, help="style profile JSON from `vlogcut style build`")
     c.add_argument("-w", "--workspace", type=Path, help="cache dir (default ./workspace/<folder>)")
     c.add_argument("-o", "--out", type=Path, help="preview path (default inside the workspace)")
     c.add_argument("--music", type=Path, help="background music file (your own)")
@@ -39,26 +39,37 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--no-render", action="store_true", help="plan only, write the EDL")
     c.add_argument("-v", "--verbose", action="store_true")
 
-    s = sub.add_parser("style", help="extract a style profile from finished reference videos")
-    s.add_argument("refs", type=Path, nargs="+", help="videos in the style to learn")
-    s.add_argument("-o", "--out", type=Path, default=Path("profile.json"), help="profile JSON")
-    s.add_argument(
+    s = sub.add_parser("style", help="style profiles: build from references, show, diff")
+    ss = s.add_subparsers(dest="style_command", required=True)
+    b = ss.add_parser("build", help="extract a style profile from finished reference videos")
+    b.add_argument("refs", type=Path, nargs="+", help="videos in the style to learn")
+    b.add_argument("-o", "--out", type=Path, default=Path("profile.json"), help="profile JSON")
+    b.add_argument(
         "-w", "--workspace", type=Path, default=Path("workspace") / "references",
         help="cache dir for reference proxies and cuts (default workspace/references)",
     )  # fmt: skip
-    s.add_argument("-v", "--verbose", action="store_true")
+    b.add_argument("-v", "--verbose", action="store_true")
+    sh = ss.add_parser("show", help="print a profile's summary and pacing table")
+    sh.add_argument("profile", type=Path, help="profile JSON from `vlogcut style build`")
+    d = ss.add_parser("diff", help="distance between two profiles, per dimension")
+    d.add_argument("a", type=Path, help="profile JSON")
+    d.add_argument("b", type=Path, help="profile JSON")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    verbose = getattr(args, "verbose", False)
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.WARNING,
+        level=logging.DEBUG if verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    if not args.verbose:
+    if not verbose:
         _quiet_scenedetect()
-    return _cut(args) if args.command == "cut" else _style(args)
+    if args.command == "cut":
+        return _cut(args)
+    commands = {"build": _style_build, "show": _style_show, "diff": _style_diff}
+    return commands[args.style_command](args)
 
 
 def _cut(args: argparse.Namespace) -> int:
@@ -107,7 +118,7 @@ def _cut(args: argparse.Namespace) -> int:
     return 0
 
 
-def _style(args: argparse.Namespace) -> int:
+def _style_build(args: argparse.Namespace) -> int:
     from vlogcut.analyze.shots import ShotDetectionError
     from vlogcut.ingest import FFmpegError, FFmpegNotFoundError, ProbeError, ProxyError
     from vlogcut.style import StyleError, build_profile
@@ -134,6 +145,35 @@ def _style(args: argparse.Namespace) -> int:
     print(f"style     {profile.notes}")
     print(f"profile   {args.out}")
     print(f"done in {time.perf_counter() - started:.1f} s")
+    return 0
+
+
+def _style_show(args: argparse.Namespace) -> int:
+    from vlogcut.style import StyleError, load_profile
+    from vlogcut.style.distance import format_profile
+
+    if not args.profile.is_file():
+        return _fail(f"profile not found: {args.profile}")
+    try:
+        profile = load_profile(args.profile)
+    except StyleError as exc:
+        return _fail(str(exc))
+    print(format_profile(args.profile.name, profile))
+    return 0
+
+
+def _style_diff(args: argparse.Namespace) -> int:
+    from vlogcut.style import StyleError, load_profile, profile_distance
+    from vlogcut.style.distance import format_diff
+
+    for path in (args.a, args.b):
+        if not path.is_file():
+            return _fail(f"profile not found: {path}")
+    try:
+        a, b = load_profile(args.a), load_profile(args.b)
+    except StyleError as exc:
+        return _fail(str(exc))
+    print(format_diff(args.a.name, a, args.b.name, b, profile_distance(a, b)))
     return 0
 
 
