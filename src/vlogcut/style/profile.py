@@ -157,6 +157,21 @@ def build_profile(
     return aggregate(refs, params)
 
 
+def load_profile(path: str | Path) -> StyleProfile:
+    """Read a profile JSON written by `vlogcut style` (or edited by hand).
+
+    Invalid files raise `StyleError` with the first problem on one line, so callers can
+    fail before any analysis starts.
+    """
+    path = Path(path)
+    try:
+        return StyleProfile.model_validate_json(path.read_text(encoding="utf-8"))
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        where = ".".join(str(p) for p in first["loc"]) or "json"
+        raise StyleError(f"invalid style profile {path}: {where}: {first['msg']}") from exc
+
+
 def _load_cache(path: Path, asset_id: str, params: ReferenceParams) -> ReferenceCuts | None:
     if not path.is_file():
         return None
