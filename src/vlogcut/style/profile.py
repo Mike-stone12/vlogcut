@@ -81,23 +81,35 @@ def summarize(
     )
 
 
-def aggregate(refs: Sequence[ReferenceCuts], params: ReferenceParams) -> StyleProfile:
-    """Pool the references: one duration distribution; cuts per minute from the totals,
-    so a short reference does not weigh as much as a long one."""
-    if not refs:
+def profile_from_durations(
+    per_ref: Sequence[Sequence[float]], source_refs: Sequence[str]
+) -> StyleProfile:
+    """Pool finished edits into one profile: a single duration distribution over all
+    shots, and cuts per minute from the totals, so a short reference does not weigh as
+    much as a long one. Each inner sequence is one edit's consecutive shot lengths (it
+    sums to the edit's duration and has one cut less than it has shots)."""
+    if not per_ref:
         raise StyleError("no references given")
-    durations = [d for r in refs for d in shot_durations(r.cuts, r.duration_s, params.min_shot_s)]
-    n_cuts = len(durations) - len(refs)  # after sliver merging, each reference has cuts + 1 shots
+    durations = [d for lengths in per_ref for d in lengths]
+    n_cuts = len(durations) - len(per_ref)
     if n_cuts < 1:
-        raise StyleError("no cuts found in the references")
-    total_s = sum(r.duration_s for r in refs)
+        raise StyleError("no cuts: need at least two shots to describe pacing")
+    total_s = sum(durations)
     stats = duration_stats(durations)
     cuts_per_min = n_cuts / (total_s / 60.0)
     return StyleProfile(
-        source_refs=[r.source for r in refs],
+        source_refs=list(source_refs),
         shot_duration_s=stats,
         cuts_per_min=cuts_per_min,
-        notes=summarize(len(refs), total_s, n_cuts, stats, cuts_per_min),
+        notes=summarize(len(per_ref), total_s, n_cuts, stats, cuts_per_min),
+    )
+
+
+def aggregate(refs: Sequence[ReferenceCuts], params: ReferenceParams) -> StyleProfile:
+    """Detected cuts of several references -> one pooled profile."""
+    return profile_from_durations(
+        [shot_durations(r.cuts, r.duration_s, params.min_shot_s) for r in refs],
+        [r.source for r in refs],
     )
 
 
