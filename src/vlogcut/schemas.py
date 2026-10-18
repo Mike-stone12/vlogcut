@@ -7,6 +7,7 @@ Changing one means updating ARCHITECTURE.md and the tests in the same change.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -146,6 +147,21 @@ class StyleProfile(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class Transition(BaseModel):
+    """Entry at a clip boundary; dissolves are centred without changing EDL timing."""
+
+    kind: Literal["cut", "dissolve"] = "cut"
+    duration_s: float = Field(default=0.0, ge=0)
+
+    @model_validator(mode="after")
+    def _check_duration(self) -> Transition:
+        if self.kind == "cut" and self.duration_s != 0:
+            raise ValueError("a cut must have duration 0")
+        if self.kind == "dissolve" and self.duration_s <= 0:
+            raise ValueError("a dissolve must have duration > 0")
+        return self
+
+
 class Clip(BaseModel):
     """One piece of a shot placed on the timeline, in order."""
 
@@ -153,6 +169,7 @@ class Clip(BaseModel):
     in_s: float = Field(ge=0)  # offset from the shot's start
     out_s: float
     speed: float = Field(default=1.0, gt=0.25, le=4.0)
+    transition_in: Transition = Field(default_factory=Transition)
     subtitle: str | None = None
     reason: str = ""  # why the planner chose it; useful for debugging and eval
 
@@ -181,6 +198,12 @@ class EDL(BaseModel):
     clips: list[Clip] = Field(min_length=1)
     music: list[MusicCue] = Field(default_factory=list)
     notes: str = ""
+
+    @model_validator(mode="after")
+    def _check_first_transition(self) -> EDL:
+        if self.clips[0].transition_in.kind != "cut":
+            raise ValueError("the first clip's transition_in must be a cut")
+        return self
 
     @property
     def total_duration_s(self) -> float:

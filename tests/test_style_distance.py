@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from vlogcut.pipeline import cut
-from vlogcut.schemas import EDL, Clip, DurationStats, StyleProfile
+from vlogcut.schemas import EDL, Clip, DurationStats, StyleProfile, Transition, TransitionMix
 from vlogcut.style import StyleError, build_profile, profile_distance, profile_from_edl
 from vlogcut.style.distance import format_diff, format_profile
 
@@ -51,11 +51,19 @@ def test_profile_from_edl_uses_timeline_durations():
     assert p.cuts_per_min == pytest.approx(30.0)  # 2 cuts in 4 s
     assert p.shot_duration_s.median == pytest.approx(1.0)
     assert p.source_refs == ["edl"]
-    assert p.transitions is None
+    assert p.transitions == TransitionMix(hard_cut=1, dissolve=0)
     sped_up = profile_from_edl(_edl([1.0, 2.0, 1.0], speed=2.0))  # same timeline, 2x source spans
     assert sped_up.shot_duration_s == p.shot_duration_s
     with pytest.raises(StyleError, match="two shots"):
         profile_from_edl(_edl([3.0]))
+
+
+def test_profile_from_edl_measures_dissolves_over_boundaries():
+    edl = _edl([1, 2, 1])
+    edl.clips[1].transition_in = Transition(kind="dissolve", duration_s=0.5)
+    profile = profile_from_edl(edl)
+    assert profile.transitions == TransitionMix(hard_cut=0.5, dissolve=0.5)
+    assert profile.cuts_per_min == 30
 
 
 def test_tables_name_every_dimension():
