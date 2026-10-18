@@ -111,17 +111,31 @@ class SubtitleStyle(BaseModel):
     relative_size: float | None = None  # text height / frame height
 
 
+class TransitionMix(BaseModel):
+    """Shares of measured cut types; fades currently count as dissolves."""
+
+    hard_cut: float = Field(ge=0, le=1)
+    dissolve: float = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _sum_to_one(self) -> TransitionMix:
+        if abs(self.hard_cut + self.dissolve - 1) > 1e-6:
+            raise ValueError("transition shares must sum to 1 within 1e-6")
+        return self
+
+
 class StyleProfile(BaseModel):
     """Explicit, editable description of a creator's editing style."""
 
     version: int = 1
     source_refs: list[str] = Field(default_factory=list)
     shot_duration_s: DurationStats
-    cuts_per_min: float = Field(gt=0)
+    cuts_per_min: float = Field(ge=0)
     beat_aligned_ratio: float | None = Field(default=None, ge=0, le=1)  # None = not measured
     bpm_range: tuple[float, float] | None = None
     intro_s: float | None = None
     speech_ratio: float | None = Field(default=None, ge=0, le=1)  # None = not measured
+    transitions: TransitionMix | None = None  # None = not measured
     look: dict[str, float] = Field(default_factory=dict)  # brightness, saturation, warmth...
     subtitle: SubtitleStyle = Field(default_factory=SubtitleStyle)
     notes: str = ""  # short natural-language summary

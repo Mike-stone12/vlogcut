@@ -34,7 +34,7 @@ def test_distance_is_zero_for_identical_and_one_octave_for_double_speed():
     assert d.total == pytest.approx(1.0)
     assert d.per_dim == pytest.approx({"p10": 1.0, "median": 1.0, "p90": 1.0, "cuts_per_min": 1.0})
     assert profile_distance(b, a).total == pytest.approx(d.total)  # symmetric
-    assert d.unmeasured == ["beat_aligned_ratio", "speech_ratio"]
+    assert d.unmeasured == ["beat_aligned_ratio", "speech_ratio", "dissolve"]
 
 
 def test_ratio_dims_count_only_when_measured_on_both_sides():
@@ -42,7 +42,7 @@ def test_ratio_dims_count_only_when_measured_on_both_sides():
     b = _profile(1.0, 2.0, 4.0, 20.0, beat_aligned_ratio=0.3)
     d = profile_distance(a, b)
     assert d.per_dim["beat_aligned_ratio"] == pytest.approx(0.5)
-    assert d.unmeasured == ["speech_ratio"]
+    assert d.unmeasured == ["speech_ratio", "dissolve"]
     assert d.total == pytest.approx(0.5 / 5)  # four pacing dims at 0 plus one ratio dim
 
 
@@ -51,6 +51,7 @@ def test_profile_from_edl_uses_timeline_durations():
     assert p.cuts_per_min == pytest.approx(30.0)  # 2 cuts in 4 s
     assert p.shot_duration_s.median == pytest.approx(1.0)
     assert p.source_refs == ["edl"]
+    assert p.transitions is None
     sped_up = profile_from_edl(_edl([1.0, 2.0, 1.0], speed=2.0))  # same timeline, 2x source spans
     assert sped_up.shot_duration_s == p.shot_duration_s
     with pytest.raises(StyleError, match="two shots"):
@@ -65,6 +66,38 @@ def test_tables_name_every_dimension():
     assert "not measured" in text  # the ratio dims
     shown = format_profile("fast.json", a)
     assert "cuts/min" in shown and "28.80" in shown and "beat" not in shown
+
+
+def test_dissolve_distance_is_absolute_difference_and_has_a_diff_row():
+    a = _profile(1, 2, 4, 20, transitions={"hard_cut": 0.8, "dissolve": 0.2})
+    b = _profile(1, 2, 4, 20, transitions={"hard_cut": 0.3, "dissolve": 0.7})
+    for left, right in [(a, b), (b, a)]:
+        d = profile_distance(left, right)
+        assert d.per_dim["dissolve"] == pytest.approx(0.5)
+        assert d.total == pytest.approx(0.5 / 5)
+    text = format_diff("a", a, "b", b, profile_distance(a, b))
+    row = next(line for line in text.splitlines() if line.startswith("dissolve"))
+    assert row.split() == ["dissolve", "0.20", "0.70", "0.50"]
+
+
+def test_dissolve_is_unmeasured_when_either_profile_is_unmeasured():
+    a = _profile(1, 2, 4, 20, transitions={"hard_cut": 1, "dissolve": 0})
+    b = _profile(1, 2, 4, 20)
+    for left, right in [(a, b), (b, a), (b, b)]:
+        d = profile_distance(left, right)
+        assert "dissolve" not in d.per_dim
+        assert "dissolve" in d.unmeasured
+
+
+def test_zero_cut_rates_have_defined_log_distances():
+    zero = _profile(10, 10, 10, 0)
+    positive = _profile(10, 10, 10, 6)
+    assert profile_distance(zero, zero).total == 0
+    for a, b in [(zero, positive), (positive, zero)]:
+        d = profile_distance(a, b)
+        assert d.per_dim["cuts_per_min"] == float("inf")
+        assert d.total == float("inf")
+        assert "inf" in format_diff("a", a, "b", b, d)
 
 
 # ---------------------------------------------------------------------------

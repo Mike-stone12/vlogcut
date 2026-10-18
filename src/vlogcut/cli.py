@@ -49,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="cache dir for reference proxies and cuts (default workspace/references)",
     )  # fmt: skip
     b.add_argument("-v", "--verbose", action="store_true")
-    sh = ss.add_parser("show", help="print a profile's summary and pacing table")
+    sh = ss.add_parser("show", help="print a profile's summary, pacing and transition mix")
     sh.add_argument("profile", type=Path, help="profile JSON from `vlogcut style build`")
     d = ss.add_parser("diff", help="distance between two profiles, per dimension")
     d.add_argument("a", type=Path, help="profile JSON")
