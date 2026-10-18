@@ -5,8 +5,15 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from vlogcut.plan import RoughCutError, RoughCutParams, rough_cut, score_shot
-from vlogcut.plan.rules import fit_lengths
+from vlogcut.plan.rules import (
+    DEFAULT_PACING,
+    assign_lengths,
+    expected_length,
+    fit_lengths,
+    sample_lengths,
+)
 from vlogcut.schemas import DurationStats, MediaAsset, QualityFlags, Shot, StyleProfile
+from vlogcut.style.profile import duration_stats
 
 T0 = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
 
@@ -39,6 +46,35 @@ def _by_id(shots: list[Shot]) -> dict[str, Shot]:
 
 
 # ---------------------------------------------------------------------------
+
+
+def test_sample_lengths_small_counts_and_expected_length():
+    assert sample_lengths(DEFAULT_PACING, 1) == [3.0]
+    assert sample_lengths(DEFAULT_PACING, 2) == [1.5, 5.0]
+    assert expected_length(DEFAULT_PACING) == pytest.approx(3.15)
+    flat = DurationStats(p10=2, median=2, p90=2)
+    assert sample_lengths(flat, 12) == [2.0] * 12
+
+
+@pytest.mark.parametrize("k", [12, 19])
+@pytest.mark.parametrize("pace", [DEFAULT_PACING, DurationStats(p10=0.5, median=0.77, p90=1)])
+def test_sample_lengths_reproduce_profile(pace, k):
+    lengths = sample_lengths(pace, k)
+    assert len(lengths) == k and lengths == sorted(lengths)
+    assert all(pace.p10 <= length <= pace.p90 for length in lengths)
+    measured = duration_stats(lengths)
+    for field in ("p10", "median", "p90"):
+        assert getattr(measured, field) == pytest.approx(getattr(pace, field), rel=0.03)
+    assert sum(lengths) / k == pytest.approx(expected_length(pace), rel=0.02)
+
+
+def test_assign_lengths_by_capacity_score_and_chronology():
+    targets, scores = [0.5, 1, 2], [0.5, 0.9, 0.9]
+    assert assign_lengths(targets, [3, 1, 3], scores, [False] * 3) == [1, 0.5, 2]
+    assert assign_lengths(targets, [3, 1, 1.1], scores, [False, False, True]) == [2, 0.5, 1.1]
+    assert assign_lengths(targets, [3] * 3, [0.9] * 3, [False] * 3) == [2, 1, 0.5]
+    assert assign_lengths(targets, [3, 1, 1.1], scores, [True] * 3) == [3, 1, 1.1]
+    assert targets == [0.5, 1, 2]  # assignment does not consume the caller's samples
 
 
 def test_fit_lengths_hits_target_within_bounds():
@@ -133,6 +169,10 @@ def test_style_profile_pacing_changes_the_cut():
     quick = rough_cut(shots, assets, RoughCutParams(target_s=60), profile=fast)
     assert len(quick.clips) > 2 * len(slow.clips)
     assert all(c.out_s - c.in_s <= 2.0 + 1e-6 for c in quick.clips)
+    for edl, pace in ((quick, fast.shot_duration_s), (slow, DEFAULT_PACING)):
+        measured = duration_stats([c.timeline_duration_s for c in edl.clips])
+        for field in ("p10", "median", "p90"):
+            assert getattr(measured, field) == pytest.approx(getattr(pace, field), rel=0.1)
 
 
 def test_short_footage_uses_everything_and_says_so():

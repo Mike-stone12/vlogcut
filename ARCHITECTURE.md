@@ -276,6 +276,7 @@ unrelated footage in a way viewers recognise. Protocol:
       profile (`pipeline.py`)
 - [x] Week 2 · style distance + round-trip eval (`style/distance.py`,
       `vlogcut style show / diff`, `tests/test_style_distance.py`)
+- [x] Week 2 · rules planner reproduces the profile's shot-length distribution
 
 Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 
@@ -285,7 +286,8 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   the cut; the distance must be small. This is the first eval and doubles as a unit test:
   `tests/test_style_distance.py` cuts generated footage with a fast and a slow reference
   profile and requires the round trip (via the EDL and via the rendered preview) to land
-  within a third of the distance between the two references.
+  within a third of the distance between the two references. The fast-reference EDL
+  distance must also be < 0.1 octaves; the rendered-preview distance must be < 0.2.
 - Style distance (`style/distance.py`): per dimension |log2(a / b)| for the positive
   pacing quantities (shot-duration p10 / median / p90, cuts per minute), so the unit is
   octaves (1.0 = twice as fast or slow); absolute difference for the ratio dimensions in
@@ -367,7 +369,8 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   moments. (Plain shot-count bins let a long one-take crowd out the last scene.)
   "highlights" = top-k by score, re-sorted by time. Lengths share one offset clamped
   to p10..p90 and each shot's usable part; k grows / shrinks until the total is within
-  ±10 %. Clips sit mid-usable-part; shots `kept_for_audio` start at the usable start
+  ±10 %. Base lengths now sample the profile distribution (see 2026-10-15 below).
+  Clips sit mid-usable-part; shots `kept_for_audio` start at the usable start
   and run to p90. Score is quality-only and pluggable (highlight features — faces,
   audio peaks, motion peaks, composition — come with the style profile in week 2, with
   weights learned from reference videos, not hard-coded).
@@ -437,13 +440,28 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   detection; what the unit test uses) and `style build` on the rendered preview (the
   path users take; also checks the detector's recall on our own output). CLI: `vlogcut
   style` became `style build | show | diff`, since argparse cannot mix positional
-  references with subcommands and the interface was unreleased. The round-trip bar is
-  relative (under a third of the fast-vs-slow reference distance), not absolute: the
-  rules planner gives all clips nearly one length (one shared offset), so the output's
-  p10 is always above and its p90 always below the reference's and even a perfect run
-  measures ≈ 0.3 octaves. Known gap: sampling clip lengths from the reference
-  distribution is the next planner change. No `eval/` directory yet: the first eval
-  doubles as a unit test; real-footage protocols and results live in the private notes.
+  references with subcommands and the interface was unreleased. The initial round-trip
+  bar was relative (under a third of the fast-vs-slow reference distance): the rules
+  planner gave all clips nearly one length (one shared offset), pushing p10 above and
+  p90 below the reference's and leaving even a perfect run at ≈ 0.3 octaves. This known
+  gap was resolved by reference-distribution sampling on 2026-10-15, adding absolute
+  round-trip limits. No `eval/` directory yet: the first eval doubles as a unit test;
+  real-footage protocols and results live in the private notes.
+- 2026-10-15: rules planner length sampling — Q(u) is piecewise linear through
+  (0.1, p10), (0.5, median), (0.9, p90), with flat tails to stay in p10..p90. Sample
+  at j/(k-1), or the median for k=1, to reproduce inclusive duration quantiles.
+  Choose k = round(target / expected_length), at least one, using Q's integral
+  0.3·p10 + 0.4·median + 0.3·p90; the median over-counted clips for right-skewed
+  profiles. Assign descending targets by descending usable cap, then score, then
+  earlier chronological order. Ties are deterministic; no interleaving or pacing
+  curve yet. Each `kept_for_audio` shot starts with its cap, replacing the nearest
+  remaining target, and still starts at the usable segment's beginning. The existing
+  shared-offset fit, p10..cap bounds and ±10 % clip-count adjustment remain unchanged;
+  selection and placement are unchanged. Offline simulation: fast reference
+  0.50 / 0.77 / 1.00 s, 12 roughly 3 s candidates, target 9 s gives 0.017 octaves
+  (previously ≈ 0.26); default pacing at 60 s gives ≈ 0.03. Slow-reference distance
+  only improves ≈ 0.33 → 0.18 because roughly 3 s footage cannot fit its 4.7 s p90.
+  These are simulation figures, not measurements from real footage.
 
 ## Open questions
 

@@ -7,9 +7,9 @@ Week-1 baseline and, later, the fallback when the planner's EDL cannot be repair
 3. pick shots: "coverage" = every recording (a moment of the day) gets a clip, the rest
    by how much usable footage it has, best shot per chronological bin; "highlights" =
    the k best overall, then re-sorted by time
-4. fit clip lengths to the target with one shared offset, clamped to the pacing range
-   (style profile p10..p90) and to what each shot has; grow / shrink k until the total
-   is within tolerance
+4. sample the profile's length distribution, using its mean to choose k; assign long
+   samples to shots with room, then fit to the target with one shared offset clamped
+   to p10..p90 and each shot's usable part; grow / shrink k until within tolerance
 5. place each clip in the middle of the usable part; shots kept for their audio
    (someone talking) start at the beginning of the usable part and run as long as the
    pacing allows, so speech is less likely to be cut mid-sentence
@@ -78,6 +78,56 @@ def order_key(asset: MediaAsset | None) -> tuple:
     if asset.created_at is not None:
         return (0, asset.created_at.timestamp(), asset.path)
     return (1, asset.path, "")
+
+
+def expected_length(pace: DurationStats) -> float:
+    """Mean of the piecewise-linear quantile function with flat tails."""
+    return 0.3 * pace.p10 + 0.4 * pace.median + 0.3 * pace.p90
+
+
+def sample_lengths(pace: DurationStats, k: int) -> list[float]:
+    """Sample Q(j / (k - 1)) in ascending order; a single clip gets the median."""
+    if k == 1:
+        return [pace.median]
+    lengths = []
+    for j in range(k):
+        u = j / (k - 1)
+        if u <= 0.1:
+            length = pace.p10
+        elif u <= 0.5:
+            length = pace.p10 + (pace.median - pace.p10) * (u - 0.1) / 0.4
+        elif u < 0.9:
+            length = pace.median + (pace.p90 - pace.median) * (u - 0.5) / 0.4
+        else:
+            length = pace.p90
+        lengths.append(length)
+    return lengths
+
+
+def assign_lengths(
+    targets: Sequence[float],
+    caps: Sequence[float],
+    scores: Sequence[float],
+    talking: Sequence[bool],
+) -> list[float]:
+    """Pair long targets with roomy, high-score shots; ties prefer earlier shots.
+
+    Talking shots take their cap, replacing the nearest remaining target. Inputs
+    have equal lengths and shots are chronological; output follows that order.
+    """
+    remaining = sorted(targets, reverse=True)
+    base = list(caps)
+    for i, is_talking in enumerate(talking):
+        if is_talking:
+            nearest = min(range(len(remaining)), key=lambda j: abs(remaining[j] - caps[i]))
+            remaining.pop(nearest)
+    order = sorted(
+        (i for i in range(len(caps)) if not talking[i]),
+        key=lambda i: (-caps[i], -scores[i], i),
+    )
+    for i, length in zip(order, remaining, strict=True):
+        base[i] = length
+    return base
 
 
 def fit_lengths(base: Sequence[float], lo: Sequence[float], hi: Sequence[float], target: float):
@@ -163,7 +213,7 @@ def rough_cut(
         )
 
     target, tol = params.target_s, params.tolerance
-    k = max(1, round(target / pace.median))
+    k = max(1, round(target / expected_length(pace)))
     seen: set[int] = set()
     while True:
         picked = select(cands, k, params.strategy)
@@ -197,8 +247,12 @@ def rough_cut(
 def _lengths(picked: list[_Candidate], pace: DurationStats, target: float) -> list[float]:
     caps = [min(pace.p90, c.avail) for c in picked]
     floors = [min(pace.p10, cap) for cap in caps]
-    # talking shots start from their cap so they stay as whole as the pacing allows
-    base = [cap if c.talking else pace.median for c, cap in zip(picked, caps, strict=True)]
+    base = assign_lengths(
+        sample_lengths(pace, len(picked)),
+        caps,
+        [c.score for c in picked],
+        [c.talking for c in picked],
+    )
     return fit_lengths(base, floors, caps, target)
 
 
