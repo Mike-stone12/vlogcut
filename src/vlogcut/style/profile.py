@@ -64,6 +64,20 @@ class StyleError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
+def combine_cuts(
+    hard_cuts: Sequence[float],
+    dissolves: Sequence[tuple[float, float]],
+    min_gap_s: float,
+) -> tuple[list[float], list[float]]:
+    """Merge detections and identify unique surviving dissolve boundaries."""
+    cuts = transitions.merge_cuts(hard_cuts, dissolves, min_gap_s)
+    # merge_cuts emits midpoints unchanged, so exact membership tracks provenance
+    # without labelling nearby hard cuts as dissolves. Take values from its output.
+    midpoints = {(start + end) / 2 for start, end in dissolves}
+    dissolve_cuts = [cut for cut in dict.fromkeys(cuts) if cut in midpoints]
+    return cuts, dissolve_cuts
+
+
 def shot_durations(cuts: Sequence[float], duration_s: float, min_shot_s: float) -> list[float]:
     """Shot lengths between cuts; slivers shorter than `min_shot_s` join a neighbour.
     Long shots are kept whole (no `split_long`): their length *is* the style."""
@@ -180,13 +194,7 @@ def analyze_reference(
         found = transitions.find_dissolves(
             transitions.load_frames(asset.proxy_path), transitions.SAMPLE_FPS
         )
-        cuts = transitions.merge_cuts(cuts, found, params.min_shot_s)
-        midpoints = [(start + end) / 2 for start, end in found]
-        # Keep exact merged values, once each, so removed midpoints cannot enter
-        # the cache. The merger emits midpoints unchanged; allow microsecond rounding.
-        dissolve_cuts = [
-            cut for cut in dict.fromkeys(cuts) if any(abs(cut - mid) <= 1e-6 for mid in midpoints)
-        ]
+        cuts, dissolve_cuts = combine_cuts(cuts, found, params.min_shot_s)
     record = ReferenceCuts(
         asset_id=asset.asset_id, source=str(path), duration_s=asset.duration_s, params=params,
         cuts=cuts, dissolve_cuts=dissolve_cuts,
