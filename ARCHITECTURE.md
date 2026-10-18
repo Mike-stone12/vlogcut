@@ -143,7 +143,7 @@ explainable, and it would break principle 2.
 ### 6. Render / export
 - Preview mp4 (`render/preview.py`): FFmpeg on proxies (fast, low-res); cached per-clip
   segments joined losslessly; debug subtitle track with source + reason per clip.
-  Planned: dissolves / fades per `Clip.transition_in`, per-clip audio mode (keep / mute
+  Planned: dissolves per `Clip.transition_in`, per-clip audio mode (keep / mute
   / duck under music)
 - Interchange: an OpenTimelineIO timeline is the canonical export; JianYing and FCPXML
   are exporters from it, so a change in one app's format never reaches the planner
@@ -174,7 +174,7 @@ Defined in `src/vlogcut/schemas.py`:
 | `MediaAsset` | ingest | analyze, render |
 | `Shot` (+ `QualityFlags`) | analyze | plan, validate, render |
 | `StyleProfile` | style | plan, validate, feedback |
-| `EDL` (+ `Clip`, `MusicCue`) | plan | validate, render |
+| `EDL` (+ `Clip`, `Transition`, `MusicCue`) | plan | validate, render |
 
 Changing a schema means updating this file and the tests in the same change.
 
@@ -185,11 +185,18 @@ analysis exists: `None` means "not measured", which is not the same as 0.
 JSON without this field still loads. The mix is unmeasured when dissolve detection is off
 or no cuts survive merging. Profiles still require at least one cut to describe pacing.
 
+`Clip.transition_in: Transition` defaults to a hard cut, so old EDL JSON still loads.
+`Transition.kind` is `cut` or `dissolve`; `duration_s` is 0 for a cut and strictly
+positive for a dissolve. The first EDL clip must enter with a cut. A dissolve is
+centred on the boundary: it changes no clip in/out points, timeline durations, or
+EDL total. Media overlap is a renderer concern to be handled later; the preview
+currently renders all boundaries as hard cuts. `profile_from_edl` measures the
+dissolve share over the `len(clips) - 1` boundaries (and still rejects single clips).
+
 Planned additions (not yet in `schemas.py`; each lands with the module that needs it):
 
 | Field / model | Why |
 |---|---|
-| `Clip.transition_in` (cut / dissolve / fade + duration) | references' transitions are measured but cannot be reproduced |
 | `Clip.audio` (keep / mute / duck) | how voice sits under music is part of a style |
 | `MusicCue.end_s`, ducking params | music mixing needs an end and a level under speech |
 | `Shot.kind` (talking / broll), `Shot.cut_points` | structure dimension; code-proposed in/out candidates |
@@ -481,9 +488,28 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   require `dissolve_cuts` (a subset of `cuts`); validation failure invalidates old
   records and reruns detection instead of assuming zero dissolves. Style distance
   adds the absolute difference of dissolve shares, skipped when either is unmeasured.
-  EDL profiles stay unmeasured until clips carry transitions; planning and rendering
-  are unchanged.
+  EDL profiles now measure the mix from `Clip.transition_in`, and the rules planner
+  assigns it (see the EDL transitions entry below); rendering remains unchanged.
   `dissolve_cuts` are taken from the merged cut list.
+
+- 2026-10-18: EDL transitions — **schema change**: `Transition(kind, duration_s)` and
+  `Clip.transition_in` describe entry at each boundary. Old EDLs default to hard cuts;
+  cuts require duration 0, dissolves require duration > 0, and clip 0 must be a cut.
+  No `fade` kind until the reference detector distinguishes fades through black,
+  which currently count as two dissolves. The rules planner assigns
+  `n = round(dissolve_share * (k - 1))` dissolves at clip indices
+  `floor((j + 0.5) * (k - 1) / n) + 1`, for `j = 0..n-1`: even, deterministic
+  placement over the boundaries, never clip 0. Without a measured mix, or with fewer
+  than two clips, all entries are cuts. Default dissolve duration is 0.5 s, capped
+  at half the shorter neighbouring clip's final timeline duration, after fitting and
+  in/out rounding. Selection, length sampling, fitting and placement are unchanged.
+  Dissolves are centred on boundaries without changing in/out points, timeline
+  durations or the EDL total; media overlap is a future renderer concern.
+  `profile_from_edl` measures dissolves / `(len(clips) - 1)` and returns a measured
+  `TransitionMix`, including zero dissolves for old EDLs; single clips still raise
+  the pacing error. Known gap: `render/preview.py` still renders hard cuts until it
+  supports `transition_in`; these transitions describe the planned EDL, not the
+  current preview.
 
 ## Open questions
 

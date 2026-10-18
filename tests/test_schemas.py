@@ -10,6 +10,7 @@ from vlogcut.schemas import (
     QualityFlags,
     Shot,
     StyleProfile,
+    Transition,
     TransitionMix,
 )
 
@@ -40,6 +41,41 @@ def test_clip_speed_changes_timeline_duration():
 def test_edl_requires_clips():
     with pytest.raises(ValidationError):
         EDL(variant_id="v", target_duration_s=10, clips=[])
+
+
+def test_old_edl_json_defaults_to_hard_cuts():
+    edl = EDL.model_validate_json(
+        '{"variant_id": "v", "target_duration_s": 4, "clips": ['
+        '{"shot_id": "s1", "in_s": 0, "out_s": 2},'
+        '{"shot_id": "s2", "in_s": 0, "out_s": 2}]}'
+    )
+    assert all(c.transition_in == Transition(kind="cut", duration_s=0) for c in edl.clips)
+    assert edl.clips[0].transition_in is not edl.clips[1].transition_in
+
+
+@pytest.mark.parametrize(
+    "kind,duration", [("cut", 0.5), ("dissolve", 0), ("dissolve", -0.5), ("fade", 0.5)]
+)
+def test_transition_rejects_invalid_kind_or_duration(kind: str, duration: float):
+    with pytest.raises(ValidationError):
+        Transition.model_validate({"kind": kind, "duration_s": duration})
+
+
+def test_edl_rejects_first_clip_dissolve():
+    clip = Clip(
+        shot_id="s", in_s=0, out_s=2, transition_in=Transition(kind="dissolve", duration_s=0.5)
+    )
+    with pytest.raises(ValidationError, match="first clip"):
+        EDL(variant_id="v", target_duration_s=2, clips=[clip])
+
+
+def test_dissolve_preserves_edl_timing_and_round_trips():
+    clips = [Clip(shot_id=f"s{i}", in_s=1, out_s=5, speed=2) for i in range(2)]
+    clips[1].transition_in = Transition(kind="dissolve", duration_s=0.5)
+    edl = EDL(variant_id="v", target_duration_s=4, clips=clips)
+    assert edl.total_duration_s == 4
+    assert all(c.timeline_duration_s == 2 and (c.in_s, c.out_s) == (1, 5) for c in clips)
+    assert EDL.model_validate_json(edl.model_dump_json()) == edl
 
 
 def test_style_profile_duration_stats_ordered():

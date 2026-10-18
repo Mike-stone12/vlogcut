@@ -8,11 +8,20 @@ from vlogcut.plan import RoughCutError, RoughCutParams, rough_cut, score_shot
 from vlogcut.plan.rules import (
     DEFAULT_PACING,
     assign_lengths,
+    assign_transitions,
     expected_length,
     fit_lengths,
     sample_lengths,
 )
-from vlogcut.schemas import DurationStats, MediaAsset, QualityFlags, Shot, StyleProfile
+from vlogcut.schemas import (
+    DurationStats,
+    MediaAsset,
+    QualityFlags,
+    Shot,
+    StyleProfile,
+    Transition,
+    TransitionMix,
+)
 from vlogcut.style.profile import duration_stats
 
 T0 = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
@@ -83,6 +92,55 @@ def test_fit_lengths_hits_target_within_bounds():
     assert out[2] == 2 and all(1.5 <= x <= 5 for x in out)
 
 
+@pytest.mark.parametrize(
+    "lengths,share", [([2.0] * 5, None), ([2.0], 1.0), ([], 0.5), ([2.0] * 5, 0)]
+)
+def test_assign_transitions_all_cuts(lengths: list[float], share: float | None):
+    assert assign_transitions(lengths, share) == [Transition() for _ in lengths]
+
+
+@pytest.mark.parametrize("share,indices", [(0.5, [2, 4]), (1.0, [1, 2, 3, 4]), (0.625, [2, 4])])
+def test_assign_transitions_even_and_deterministic(share: float, indices: list[int]):
+    lengths = [2.0] * 5
+    transitions = assign_transitions(lengths, share)
+    assert [i for i, t in enumerate(transitions) if t.kind == "dissolve"] == indices
+    assert all(transitions[i].duration_s == 0.5 for i in indices)
+    assert transitions == assign_transitions(lengths, share)
+    assert lengths == [2.0] * 5
+
+
+def test_assign_transitions_caps_duration_by_both_neighbours():
+    transitions = assign_transitions([4, 0.3, 2, 4], 1.0)
+    assert [t.duration_s for t in transitions] == pytest.approx([0, 0.15, 0.15, 0.5])
+    assert assign_transitions([4, 4], 1.0, duration_s=0.8)[1].duration_s == 0.8
+
+
+def test_rough_cut_transition_mix_preserves_clip_times():
+    shots, assets = _day()
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=0.3, median=0.7, p90=1.3), cuts_per_min=80
+    )
+    params = RoughCutParams(target_s=30)
+    plain = rough_cut(shots, assets, params, profile=profile)
+    mixed_profile = profile.model_copy(
+        update={"transitions": TransitionMix(hard_cut=0.75, dissolve=0.25)}
+    )
+    mixed = rough_cut(shots, assets, params, profile=mixed_profile)
+    assert all(c.transition_in == Transition() for c in plain.clips)
+    k = len(mixed.clips)
+    dissolves = sum(c.transition_in.kind == "dissolve" for c in mixed.clips)
+    assert dissolves / (k - 1) == pytest.approx(0.25, abs=1 / (k - 1))
+    assert mixed.clips[0].transition_in == Transition()
+    for i, (a, b) in enumerate(zip(plain.clips, mixed.clips, strict=True)):
+        assert a.model_dump(exclude={"transition_in"}) == b.model_dump(exclude={"transition_in"})
+        assert a.timeline_duration_s == b.timeline_duration_s
+        if b.transition_in.kind == "dissolve":
+            assert b.transition_in.duration_s == min(
+                0.5, 0.5 * min(mixed.clips[i - 1].timeline_duration_s, b.timeline_duration_s)
+            )
+    assert plain.total_duration_s == mixed.total_duration_s
+
+
 @pytest.mark.parametrize("strategy", ["coverage", "highlights"])
 @pytest.mark.parametrize("target", [30, 60, 120])
 def test_duration_within_tolerance_and_basic_invariants(strategy, target):
@@ -93,6 +151,7 @@ def test_duration_within_tolerance_and_basic_invariants(strategy, target):
     assert len(ids) == len(set(ids))  # each shot used once
     for clip in edl.clips:
         assert 1.5 - 1e-6 <= clip.out_s - clip.in_s <= 5 + 1e-6
+        assert clip.transition_in == Transition()
 
 
 def test_clips_are_chronological_and_undated_assets_go_last():

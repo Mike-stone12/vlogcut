@@ -21,12 +21,13 @@ quality-only default later.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable, Sequence
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from vlogcut.schemas import EDL, Clip, DurationStats, MediaAsset, Shot, StyleProfile
+from vlogcut.schemas import EDL, Clip, DurationStats, MediaAsset, Shot, StyleProfile, Transition
 
 log = logging.getLogger(__name__)
 
@@ -145,6 +146,27 @@ def fit_lengths(base: Sequence[float], lo: Sequence[float], hi: Sequence[float],
     return [min(h, max(lw, bb + t)) for bb, lw, h in zip(base, lo, hi, strict=True)]
 
 
+def assign_transitions(
+    lengths: Sequence[float], dissolve_share: float | None, duration_s: float = 0.5
+) -> list[Transition]:
+    """Evenly place dissolves over boundaries, capped by final timeline lengths.
+
+    Lengths are positive, the measured share is in [0, 1], and duration_s is positive.
+    The first clip always enters with a cut.
+    """
+    transitions = [Transition() for _ in lengths]
+    if dissolve_share is None or len(lengths) < 2:
+        return transitions
+    boundaries = len(lengths) - 1
+    n = round(dissolve_share * boundaries)
+    for j in range(n):
+        i = math.floor((j + 0.5) * boundaries / n) + 1
+        transitions[i] = Transition(
+            kind="dissolve", duration_s=min(duration_s, 0.5 * min(lengths[i - 1], lengths[i]))
+        )
+    return transitions
+
+
 def select(cands: list[_Candidate], k: int, strategy: str) -> list[_Candidate]:
     """k candidates, returned in chronological order."""
     k = max(1, min(k, len(cands)))
@@ -231,6 +253,12 @@ def rough_cut(
         _clip(c, length, i, len(picked), params.strategy)
         for i, (c, length) in enumerate(zip(picked, lengths, strict=True))
     ]
+    mix = profile.transitions if profile is not None else None
+    transitions = assign_transitions(
+        [c.timeline_duration_s for c in clips], mix.dissolve if mix is not None else None
+    )
+    for clip, transition in zip(clips, transitions, strict=True):
+        clip.transition_in = transition
     notes = (
         f"rules/{params.strategy}: {len(clips)} of {len(cands)} usable shots "
         f"({len(shots) - len(cands)} rejected or too short), {total:.1f} s for a "

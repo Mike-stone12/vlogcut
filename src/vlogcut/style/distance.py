@@ -15,7 +15,7 @@ import math
 
 from pydantic import BaseModel, Field
 
-from vlogcut.schemas import EDL, StyleProfile
+from vlogcut.schemas import EDL, StyleProfile, TransitionMix
 from vlogcut.style.profile import profile_from_durations
 
 LOG_DIMS = ("p10", "median", "p90", "cuts_per_min")  # positive; compared by |log2 ratio|
@@ -70,10 +70,11 @@ def profile_distance(a: StyleProfile, b: StyleProfile) -> StyleDistance:
 
 
 def profile_from_edl(edl: EDL, source: str = "edl") -> StyleProfile:
-    """The pacing a planned cut would measure as, with nothing rendered or detected:
-    every clip is one shot of its timeline duration. Transitions stay unmeasured until
-    clips carry transition information."""
-    return profile_from_durations([[c.timeline_duration_s for c in edl.clips]], [source])
+    """Measure timeline pacing and boundary transition mix without rendering."""
+    profile = profile_from_durations([[c.timeline_duration_s for c in edl.clips]], [source])
+    dissolve = sum(c.transition_in.kind == "dissolve" for c in edl.clips) / (len(edl.clips) - 1)
+    profile.transitions = TransitionMix(hard_cut=1 - dissolve, dissolve=dissolve)
+    return profile
 
 
 # ---------------------------------------------------------------------------
