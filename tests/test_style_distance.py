@@ -98,9 +98,11 @@ def test_round_trip_lands_near_the_reference(make_edited_clip, tmp_path):
     quick = cut(day, ws, target_s=9.0, style=fast_json, render=True, progress=lambda _m: None)
     d_edl = profile_distance(fast, profile_from_edl(quick.edl))
     assert d_edl.total < d_refs.total / 3, (d_edl, d_refs)
+    assert d_edl.total < 0.1, d_edl
     # the path users take: profile the rendered preview with the real detector
     d_video = profile_distance(fast, build_profile([quick.preview_path], refs_ws))
     assert d_video.total < d_refs.total / 3, (d_video, d_refs)
+    assert d_video.total < 0.2, d_video
     assert d_video.per_dim["cuts_per_min"] < 0.3  # the detector keeps our own cuts
 
     calm = cut(day, ws, target_s=9.0, style=slow_json, render=False, progress=lambda _m: None)
