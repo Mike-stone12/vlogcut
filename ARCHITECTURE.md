@@ -540,6 +540,20 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   emits `keep`; style assignment and measurement, `MusicCue.end_s` and music ducking
   parameters remain future work.
 
+- 2026-10-21: audio pauses — `analyze/pauses.py` measures energy, with no VAD model.
+  Defaults: 16 kHz mono, 20 ms RMS frames (digital silence floored at -100 dBFS),
+  quiet below max(-50 dBFS, envelope p95 minus 25 dB), a 60 ms majority window
+  (three frames), and a minimum pause of 0.25 s. The relative threshold adapts to
+  recording level and admits quiet background noise between louder bursts even
+  when it exceeds the absolute floor. Only internal gaps bounded by sound count;
+  an entirely quiet recording has no structure to cut on. Pauses are per asset;
+  sorted midpoints will be mapped to shots later with a strict interior margin
+  (default 0.1 s). No `Shot.cut_points`, pipeline wiring or cache yet, so cut-point
+  candidates remain incomplete. Quality shares the existing signed-PCM decoder;
+  its 100 ms, 8 kHz audio-activity measurement for shake rejection is unchanged.
+  Known gaps: music or background noise can hide pauses, and energy does not yet
+  distinguish speech from non-speech.
+
 ## Open questions
 
 - How many variants per run

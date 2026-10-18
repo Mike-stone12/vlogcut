@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field, ValidationError
 
+from vlogcut.analyze.pauses import _load_mono_pcm
 from vlogcut.analyze.shots import ShotSpan
 from vlogcut.ingest import ffmpeg
 from vlogcut.ingest.proxy import proxy_dims, proxy_rate
@@ -319,12 +320,8 @@ def measure_shot(asset: MediaAsset, span: ShotSpan, params: QualityParams) -> Sh
     motion = global_motion(frames.astype(np.float32))
     active = 0.0
     if asset.has_audio:
-        pcm = ffmpeg.run_bytes(
-            "ffmpeg",
-            ["-v", "error", *seek, "-i", asset.proxy_path, "-vn", "-ac", "1"]
-            + ["-ar", str(AUDIO_RATE), "-f", "s16le", "-"],
-        )
-        active = audio_active(np.frombuffer(pcm, np.int16), AUDIO_RATE, params.audio_active_db)
+        pcm = _load_mono_pcm(asset.proxy_path, AUDIO_RATE, seek)
+        active = audio_active(pcm, AUDIO_RATE, params.audio_active_db)
     return ShotMetrics(
         fps=float(fps),
         sharpness=laplacian_var(frames).tolist(),
