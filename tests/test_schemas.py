@@ -79,8 +79,8 @@ def test_old_profile_json_has_unmeasured_transitions():
     assert profile.transitions is None
 
 
-def test_style_profile_cut_rate_accepts_zero_but_not_negative():
+@pytest.mark.parametrize("rate", [0, -1])
+def test_style_profile_requires_positive_cut_rate(rate):
     stats = DurationStats(p10=60, median=60, p90=60)
-    assert StyleProfile(shot_duration_s=stats, cuts_per_min=0).transitions is None
     with pytest.raises(ValidationError):
-        StyleProfile(shot_duration_s=stats, cuts_per_min=-1)
+        StyleProfile(shot_duration_s=stats, cuts_per_min=rate)

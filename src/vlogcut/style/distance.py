@@ -1,13 +1,12 @@
 """Distance between style profiles, and the profile a planned cut would measure as.
 
-Pacing dimensions (shot-duration p10 / median / p90, cuts per minute) are ratio
+Pacing dimensions (shot-duration p10 / median / p90, cuts per minute) are positive ratio
 quantities: a 1 s shot next to a 2 s one is as different as 4 s next to 8 s. Each is
 compared as |log2(a / b)|, so the unit is octaves and 1.0 means twice as fast or twice as
 slow. Ratio dimensions in [0, 1] (`beat_aligned_ratio`, `speech_ratio`, `dissolve`) use the absolute
 difference. A dimension that either side has not measured (`None`) is skipped and listed
 in `StyleDistance.unmeasured`. Dimensions are equally weighted until the eval set says
 otherwise. Pure functions, no numpy.
-Zero cuts/min matches zero exactly; against a positive rate its log distance is infinite.
 """
 
 from __future__ import annotations
@@ -17,9 +16,9 @@ import math
 from pydantic import BaseModel, Field
 
 from vlogcut.schemas import EDL, StyleProfile
-from vlogcut.style.profile import StyleError, profile_from_durations
+from vlogcut.style.profile import profile_from_durations
 
-LOG_DIMS = ("p10", "median", "p90", "cuts_per_min")  # compared by |log2 ratio|
+LOG_DIMS = ("p10", "median", "p90", "cuts_per_min")  # positive; compared by |log2 ratio|
 RATIO_DIMS = ("beat_aligned_ratio", "speech_ratio", "dissolve")  # |difference| in [0, 1]
 _LABELS = {
     "p10": "p10 shot s",
@@ -63,10 +62,7 @@ def profile_distance(a: StyleProfile, b: StyleProfile) -> StyleDistance:
         if x is None or y is None:
             unmeasured.append(dim)
         elif dim in LOG_DIMS:
-            if x == 0 or y == 0:
-                per_dim[dim] = 0.0 if x == y else math.inf
-            else:
-                per_dim[dim] = abs(math.log2(x / y))
+            per_dim[dim] = abs(math.log2(x / y))
         else:
             per_dim[dim] = abs(x - y)
     total = sum(per_dim.values()) / len(per_dim)  # the pacing dims are always measured
@@ -77,8 +73,6 @@ def profile_from_edl(edl: EDL, source: str = "edl") -> StyleProfile:
     """The pacing a planned cut would measure as, with nothing rendered or detected:
     every clip is one shot of its timeline duration. Transitions stay unmeasured until
     clips carry transition information."""
-    if len(edl.clips) < 2:
-        raise StyleError("no cuts: need at least two shots to describe pacing")
     return profile_from_durations([[c.timeline_duration_s for c in edl.clips]], [source])
 
 

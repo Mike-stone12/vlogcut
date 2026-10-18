@@ -130,7 +130,7 @@ class StyleProfile(BaseModel):
     version: int = 1
     source_refs: list[str] = Field(default_factory=list)
     shot_duration_s: DurationStats
-    cuts_per_min: float = Field(ge=0)
+    cuts_per_min: float = Field(gt=0)
     beat_aligned_ratio: float | None = Field(default=None, ge=0, le=1)  # None = not measured
     bpm_range: tuple[float, float] | None = None
     intro_s: float | None = None

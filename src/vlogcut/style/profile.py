@@ -88,6 +88,14 @@ def summarize(
     )
 
 
+def transition_mix(n_dissolves: int | None, n_cuts: int) -> TransitionMix | None:
+    """Pooled shares of surviving cuts; missing detection or no cuts is unmeasured."""
+    if n_dissolves is None or n_cuts == 0:
+        return None
+    dissolve = n_dissolves / n_cuts
+    return TransitionMix(hard_cut=1 - dissolve, dissolve=dissolve)
+
+
 def profile_from_durations(
     per_ref: Sequence[Sequence[float]],
     source_refs: Sequence[str],
@@ -98,25 +106,17 @@ def profile_from_durations(
     shots, and cuts per minute from the totals, so a short reference does not weigh as
     much as a long one. Each inner sequence is one edit's consecutive shot lengths (it
     sums to the edit's duration and has one cut less than it has shots).
-    `n_dissolves` counts surviving dissolve boundaries; None means not measured.
-    References with no cuts have a zero rate and no measured transition mix."""
+    `n_dissolves` counts surviving dissolve boundaries; None means not measured."""
     if not per_ref:
         raise StyleError("no references given")
     durations = [d for lengths in per_ref for d in lengths]
     n_cuts = len(durations) - len(per_ref)
-    if any(not lengths for lengths in per_ref):
-        raise StyleError("each reference needs at least one shot")
+    if n_cuts < 1:
+        raise StyleError("no cuts: need at least two shots to describe pacing")
     total_s = sum(durations)
-    stats = (
-        duration_stats(durations)
-        if len(durations) > 1
-        else DurationStats(p10=durations[0], median=durations[0], p90=durations[0])
-    )
+    stats = duration_stats(durations)
     cuts_per_min = n_cuts / (total_s / 60.0)
-    mix = None
-    if n_dissolves is not None and n_cuts > 0:
-        dissolve = n_dissolves / n_cuts
-        mix = TransitionMix(hard_cut=1 - dissolve, dissolve=dissolve)
+    mix = transition_mix(n_dissolves, n_cuts)
     notes = summarize(len(per_ref), total_s, n_cuts, stats, cuts_per_min)
     if mix is not None:
         notes += f"; {mix.dissolve:.1%} dissolves"
@@ -181,7 +181,12 @@ def analyze_reference(
             transitions.load_frames(asset.proxy_path), transitions.SAMPLE_FPS
         )
         cuts = transitions.merge_cuts(cuts, found, params.min_shot_s)
-        dissolve_cuts = [(start + end) / 2 for start, end in found]
+        midpoints = [(start + end) / 2 for start, end in found]
+        # Keep exact merged values, once each, so removed midpoints cannot enter
+        # the cache. The merger emits midpoints unchanged; allow microsecond rounding.
+        dissolve_cuts = [
+            cut for cut in dict.fromkeys(cuts) if any(abs(cut - mid) <= 1e-6 for mid in midpoints)
+        ]
     record = ReferenceCuts(
         asset_id=asset.asset_id, source=str(path), duration_s=asset.duration_s, params=params,
         cuts=cuts, dissolve_cuts=dissolve_cuts,

@@ -89,17 +89,6 @@ def test_dissolve_is_unmeasured_when_either_profile_is_unmeasured():
         assert "dissolve" in d.unmeasured
 
 
-def test_zero_cut_rates_have_defined_log_distances():
-    zero = _profile(10, 10, 10, 0)
-    positive = _profile(10, 10, 10, 6)
-    assert profile_distance(zero, zero).total == 0
-    for a, b in [(zero, positive), (positive, zero)]:
-        d = profile_distance(a, b)
-        assert d.per_dim["cuts_per_min"] == float("inf")
-        assert d.total == float("inf")
-        assert "inf" in format_diff("a", a, "b", b, d)
-
-
 # ---------------------------------------------------------------------------
 # round trip: reference -> profile -> cut of unrelated footage -> profile of the cut
 # ---------------------------------------------------------------------------

@@ -183,7 +183,7 @@ analysis exists: `None` means "not measured", which is not the same as 0.
 `StyleProfile.transitions: TransitionMix | None = None` follows the same convention:
 `hard_cut` and `dissolve` are shares in [0, 1], summing to 1 within 1e-6. Old profile
 JSON without this field still loads. The mix is unmeasured when dissolve detection is off
-or no cuts survive merging. `cuts_per_min` permits zero for uncut references.
+or no cuts survive merging. Profiles still require at least one cut to describe pacing.
 
 Planned additions (not yet in `schemas.py`; each lands with the module that needs it):
 
@@ -300,8 +300,6 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   [0, 1], including the new `dissolve` ratio dimension (`transitions.dissolve`);
   a dimension unmeasured on either side is skipped and reported; equal weights
   until the eval set says otherwise. `vlogcut style diff a.json b.json` prints it.
-  Zero cuts/min versus zero has distance 0; zero versus a positive rate has infinite
-  log distance.
 - ~10 footage sets, each with reference videos
 - Metrics: style distance (shot-duration distribution distance, beat-alignment gap,
   structure / transition-mix distance), constraint violations, repair rounds, cost and
@@ -478,10 +476,8 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   across references, after short-shot merging, matching the cuts/min denominator.
   Fades through black count as two dissolves (known classification gap; no fade field).
   If any reference has dissolve detection off, or there are no surviving cuts, the
-  mix is `None`. To support uncut references, cuts/min now permits zero; its distance
-  is zero against zero and infinite against a positive rate. Single-shot reference
-  duration quantiles all equal that shot's length; single-clip EDLs still raise the
-  existing pacing error. Reference caches
+  mix is `None` (a defensive guard; zero-cut references still raise the existing
+  pacing error). Reference caches
   require `dissolve_cuts` (a subset of `cuts`); validation failure invalidates old
   records and reruns detection instead of assuming zero dissolves. Style distance
   adds the absolute difference of dissolve shares, skipped when either is unmeasured.

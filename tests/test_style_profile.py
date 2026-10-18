@@ -15,6 +15,7 @@ from vlogcut.style.profile import (
     analyze_reference,
     duration_stats,
     shot_durations,
+    transition_mix,
 )
 
 # ---------------------------------------------------------------------------
@@ -101,17 +102,53 @@ def test_reference_dissolves_must_be_a_subset_of_cuts():
         _ref("a", 60, [10], [20])
 
 
+def test_transition_mix_handles_unmeasured_and_pooled_counts():
+    assert transition_mix(0, 0) is None
+    assert transition_mix(None, 5) is None
+    mix = transition_mix(1, 4)
+    assert mix.dissolve == pytest.approx(0.25)
+    assert mix.hard_cut == pytest.approx(0.75)
+
+
 @pytest.mark.parametrize("cuts", [[], [0.1]])
 @pytest.mark.parametrize("detection", [False, True])
-def test_aggregate_zero_surviving_cuts_is_unmeasured(cuts, detection):
+def test_aggregate_zero_surviving_cuts_raises(cuts, detection):
     ref = _ref("a", 60, cuts, cuts)
     for refs in ([ref], [ref, _ref("b", 120, [])]):
-        p = aggregate(refs, ReferenceParams(dissolves=detection))
-        assert p.cuts_per_min == 0
-        assert p.transitions is None
-        assert "dissolves" not in p.notes
-        if len(refs) == 1:
-            assert p.shot_duration_s.model_dump() == {"p10": 60, "median": 60, "p90": 60}
+        with pytest.raises(StyleError, match="two shots"):
+            aggregate(refs, ReferenceParams(dissolves=detection))
+
+
+@pytest.mark.parametrize("rounding", [0.0, 0.0000005])
+def test_analyze_reference_records_only_surviving_dissolves(tmp_path, monkeypatch, rounding):
+    asset = MediaAsset(
+        asset_id="a",
+        path="a.mp4",
+        proxy_path="proxy.mp4",
+        duration_s=60,
+        fps=30,
+        width=64,
+        height=64,
+    )
+    monkeypatch.setattr(profile_mod, "probe_asset", lambda path: asset)
+    monkeypatch.setattr(profile_mod, "make_proxy", lambda asset, ws: asset)
+    monkeypatch.setattr(shots_mod, "detect_cuts", lambda *a, **k: [10])
+    monkeypatch.setattr(profile_mod.transitions, "load_frames", lambda path: None)
+    found = [(10.05, 10.15), (19, 21)]
+    monkeypatch.setattr(profile_mod.transitions, "find_dissolves", lambda *a: found)
+
+    def merge_cuts(hard, dissolves, min_gap_s):
+        assert hard == [10] and dissolves == found
+        assert abs(sum(dissolves[0]) / 2 - hard[0]) < min_gap_s
+        # Simulate a merger dropping the nearby midpoint and rounding the survivor.
+        return [10, 20 + rounding]
+
+    monkeypatch.setattr(profile_mod.transitions, "merge_cuts", merge_cuts)
+    record = analyze_reference("a.mp4", tmp_path)
+    assert record.cuts == [10, 20 + rounding]
+    assert record.dissolve_cuts == [record.cuts[1]]
+    cached = tmp_path / "style" / "a.cuts.json"
+    assert ReferenceCuts.model_validate_json(cached.read_text(encoding="utf-8")) == record
 
 
 @pytest.mark.parametrize("detection", [False, True])
