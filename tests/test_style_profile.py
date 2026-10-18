@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -13,6 +14,7 @@ from vlogcut.style.profile import (
     ReferenceCuts,
     aggregate,
     analyze_reference,
+    combine_cuts,
     duration_stats,
     shot_durations,
     transition_mix,
@@ -48,6 +50,46 @@ def _ref(
         asset_id=name, source=f"{name}.mp4", duration_s=duration, params=ReferenceParams(),
         cuts=cuts, dissolve_cuts=dissolves or [],
     )  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("hard_cuts", "dissolves", "expected_cuts", "expected_dissolves"),
+    [
+        pytest.param([10.0, 30.0], [(9.0, 11.0)], [10.0, 30.0], [10.0], id="coincident"),
+        pytest.param([10.02, 30.0], [(9.0, 11.0)], [10.0, 30.0], [10.0], id="nearby"),
+        pytest.param(
+            [30.0],
+            [(9.0, 11.0), (9.5, 10.5)],
+            [10.0, 10.0, 30.0],
+            [10.0],
+            id="overlap-shared-midpoint",
+        ),
+        pytest.param(
+            [30.0],
+            [(9.0, 11.0), (10.0, 12.0)],
+            [10.0, 11.0, 30.0],
+            [10.0, 11.0],
+            id="overlap-distinct-midpoints",
+        ),
+        pytest.param([9.3, 30.0], [(9.0, 11.0)], [10.0, 30.0], [10.0], id="inside"),
+        pytest.param([10.0, 30.0], [], [10.0, 30.0], [], id="no-dissolves"),
+    ],
+)
+def test_combine_cuts_tracks_merged_dissolves(
+    hard_cuts: list[float],
+    dissolves: list[tuple[float, float]],
+    expected_cuts: list[float],
+    expected_dissolves: list[float],
+) -> None:
+    cuts, dissolve_cuts = combine_cuts(hard_cuts, dissolves, min_gap_s=0.25)
+    assert cuts == profile_mod.transitions.merge_cuts(hard_cuts, dissolves, 0.25)
+    assert cuts == expected_cuts
+    assert dissolve_cuts == expected_dissolves
+    assert set(dissolve_cuts) <= set(cuts)
+    ref = _ref("a", 60.0, cuts, dissolve_cuts)
+    # Shared midpoints count once even though merge_cuts preserves duplicates.
+    profile = aggregate([ref], ReferenceParams())
+    assert profile.transitions.dissolve == pytest.approx(len(dissolve_cuts) / len(set(cuts)))
 
 
 def test_aggregate_pools_shots_and_rates_by_total_time():
@@ -119,8 +161,9 @@ def test_aggregate_zero_surviving_cuts_raises(cuts, detection):
             aggregate(refs, ReferenceParams(dissolves=detection))
 
 
-@pytest.mark.parametrize("rounding", [0.0, 0.0000005])
-def test_analyze_reference_records_only_surviving_dissolves(tmp_path, monkeypatch, rounding):
+def test_analyze_reference_records_only_surviving_dissolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     asset = MediaAsset(
         asset_id="a",
         path="a.mp4",
@@ -140,21 +183,26 @@ def test_analyze_reference_records_only_surviving_dissolves(tmp_path, monkeypatc
     def merge_cuts(hard, dissolves, min_gap_s):
         assert hard == [10] and dissolves == found
         assert abs(sum(dissolves[0]) / 2 - hard[0]) < min_gap_s
-        # Simulate a merger dropping the nearby midpoint and rounding the survivor.
-        return [10, 20 + rounding]
+        # Simulate a removed midpoint; surviving midpoints stay unchanged.
+        return [10, 20]
 
     monkeypatch.setattr(profile_mod.transitions, "merge_cuts", merge_cuts)
     record = analyze_reference("a.mp4", tmp_path)
-    assert record.cuts == [10, 20 + rounding]
+    assert record.cuts == [10, 20]
     assert record.dissolve_cuts == [record.cuts[1]]
     cached = tmp_path / "style" / "a.cuts.json"
     assert ReferenceCuts.model_validate_json(cached.read_text(encoding="utf-8")) == record
 
 
 @pytest.mark.parametrize("detection", [False, True])
-def test_old_reference_cache_is_recomputed(tmp_path, monkeypatch, detection):
+@pytest.mark.parametrize("invalid_subset", [False, True])
+def test_old_reference_cache_is_recomputed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, detection: bool, invalid_subset: bool
+) -> None:
     params = ReferenceParams(dissolves=detection)
     old = _ref("a", 60, [10]).model_dump(exclude={"dissolve_cuts"})
+    if invalid_subset:
+        old["dissolve_cuts"] = [20]
     old["params"] = params.model_dump()
     cache = tmp_path / "style" / "a.cuts.json"
     cache.parent.mkdir()

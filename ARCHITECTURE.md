@@ -483,6 +483,7 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   adds the absolute difference of dissolve shares, skipped when either is unmeasured.
   EDL profiles stay unmeasured until clips carry transitions; planning and rendering
   are unchanged.
+  `dissolve_cuts` are taken from the merged cut list.
 
 ## Open questions
 
