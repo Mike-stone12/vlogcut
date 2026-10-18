@@ -38,6 +38,23 @@ def test_clip_speed_changes_timeline_duration():
     assert clip.timeline_duration_s == pytest.approx(2.0)
 
 
+def test_clip_audio_defaults_and_old_json():
+    assert Clip(shot_id="s", in_s=0, out_s=2).audio == "keep"
+    assert Clip.model_validate_json('{"shot_id":"s","in_s":0,"out_s":2}').audio == "keep"
+
+
+@pytest.mark.parametrize("mode", ["keep", "mute", "duck"])
+def test_clip_audio_round_trips(mode: str):
+    clip = Clip.model_validate({"shot_id": "s", "in_s": 0, "out_s": 2, "audio": mode})
+    assert Clip.model_validate_json(clip.model_dump_json()).audio == mode
+
+
+@pytest.mark.parametrize("mode", ["silence", "KEEP", "", None, 0])
+def test_clip_audio_rejects_invalid_modes(mode: object):
+    with pytest.raises(ValidationError, match="audio"):
+        Clip.model_validate({"shot_id": "s", "in_s": 0, "out_s": 2, "audio": mode})
+
+
 def test_edl_requires_clips():
     with pytest.raises(ValidationError):
         EDL(variant_id="v", target_duration_s=10, clips=[])
@@ -50,6 +67,7 @@ def test_old_edl_json_defaults_to_hard_cuts():
         '{"shot_id": "s2", "in_s": 0, "out_s": 2}]}'
     )
     assert all(c.transition_in == Transition(kind="cut", duration_s=0) for c in edl.clips)
+    assert all(c.audio == "keep" for c in edl.clips)
     assert edl.clips[0].transition_in is not edl.clips[1].transition_in
 
 

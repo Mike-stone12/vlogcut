@@ -162,6 +162,9 @@ class Transition(BaseModel):
         return self
 
 
+AudioMode = Literal["keep", "mute", "duck"]
+
+
 class Clip(BaseModel):
     """One piece of a shot placed on the timeline, in order."""
 
@@ -170,6 +173,7 @@ class Clip(BaseModel):
     out_s: float
     speed: float = Field(default=1.0, gt=0.25, le=4.0)
     transition_in: Transition = Field(default_factory=Transition)
+    audio: AudioMode = "keep"  # camera audio: normal level, silence, or fixed attenuation
     subtitle: str | None = None
     reason: str = ""  # why the planner chose it; useful for debugging and eval
 
