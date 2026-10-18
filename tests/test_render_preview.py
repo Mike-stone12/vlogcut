@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from array import array
+from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
@@ -18,7 +21,16 @@ from vlogcut.render.preview import (
     segment_plan,
     srt,
 )
-from vlogcut.schemas import EDL, Clip, MediaAsset, MusicCue, QualityFlags, Shot, Transition
+from vlogcut.schemas import (
+    EDL,
+    AudioMode,
+    Clip,
+    MediaAsset,
+    MusicCue,
+    QualityFlags,
+    Shot,
+    Transition,
+)
 
 Q = QualityFlags(sharpness=100, exposure_clip=0, shake=0)
 
@@ -112,6 +124,57 @@ def test_segment_key_changes_with_what_is_rendered():
     assert base != segment_key(longer, (540, 960), PreviewParams())
 
 
+@pytest.mark.parametrize(
+    "audio,speed,body_key,blend_key",
+    [
+        (True, 1.0, "cccf8095801ad9ba", "6f187d0204fb2adf"),
+        (True, 2.0, "838241710f70fdbd", "6fd6731f94acb8ce"),
+        (False, 1.0, "cccf8095801ad9ba", "6f187d0204fb2adf"),
+        (False, 2.0, "3008542caaecd6b1", "b4fcd3d86ba29bc1"),
+    ],
+)
+def test_keep_cache_keys_match_legacy(
+    audio: bool, speed: float, body_key: str, blend_key: str
+) -> None:
+    # Golden keys captured from the renderer before Clip.audio was introduced.
+    clips = [
+        Clip(shot_id="p_000", in_s=0, out_s=2, speed=speed),
+        Clip(shot_id="p_000", in_s=2, out_s=4,
+             transition_in=Transition(kind="dissolve", duration_s=0.5)),
+    ]  # fmt: skip
+    segs = resolve(_edl(*clips), [_shot("p")], [_asset("p", audio=audio)], 30)
+    for gain in (-12, -6):
+        params = PreviewParams(duck_gain_db=gain)
+        assert segment_key(segs[0], (540, 960), params) == body_key
+        assert segment_key(segment_plan(segs, 30)[1], (540, 960), params) == blend_key
+
+
+@pytest.mark.parametrize("incoming", [False, True])
+def test_audio_modes_change_source_filters_and_cache_keys(incoming: bool) -> None:
+    clips = [Clip(shot_id="p_000", in_s=0, out_s=2, speed=2) for _ in range(2)]
+    clips[1].transition_in = Transition(kind="dissolve", duration_s=0.5)
+    segs = resolve(_edl(*clips), [_shot("p")], [_asset("p")], 30)
+    blend = segment_plan(segs, 30)[1]
+    source = blend.incoming if incoming else blend
+    params = PreviewParams()
+    keys = []
+    for mode in ("keep", "mute", "duck"):
+        source.clip.audio = mode
+        keys.append(segment_key(blend, (540, 960), params))
+        changed_gain = segment_key(blend, (540, 960), PreviewParams(duck_gain_db=-6))
+        assert (keys[-1] != changed_gain) == (mode == "duck")
+        args = segment_args(blend, (540, 960), params, "blend.mov")
+        graph = args[args.index("-filter_complex") + 1]
+        assert graph.count("volume=-12.00dB") == (mode == "duck")
+        if mode == "duck":
+            assert graph.index("volume=-12.00dB") < graph.index("acrossfade=")
+        if mode == "mute":
+            assert "anullsrc" in " ".join(args)
+            assert "aformat=sample_fmts=s16,asetpts=PTS-STARTPTS,atempo=2.000000" in graph
+        assert "afade=" not in graph
+    assert len(set(keys)) == 3
+
+
 def test_srt_lists_source_and_reason():
     clips = [Clip(shot_id="p_000", in_s=0, out_s=2, reason="rules: bin 1/2"),
              Clip(shot_id="p_000", in_s=2, out_s=4, subtitle="早安")]  # fmt: skip
@@ -197,10 +260,17 @@ def test_segment_plan_adjacent_windows_and_available_handles():
 
 @pytest.mark.ffmpeg
 @pytest.mark.parametrize(
-    ("speed", "audio", "background"), [(1.0, True, "black"), (2.0, False, "blur")]
+    ("speed", "audio", "background", "mode"),
+    [
+        (1.0, True, "black", "keep"),
+        (2.0, False, "blur", "keep"),
+        (1.0, True, "black", "mute"),
+        (2.0, True, "black", "mute"),
+    ],
 )
-def test_render_centred_dissolve(tmp_path, speed, audio, background):
+def test_render_centred_dissolve(tmp_path, speed, audio, background, mode):
     assets, shots = [], []
+    duration = 3 if mode == "mute" else 2  # keep audio handles for fade-level measurements
     for color in ("red", "blue"):
         path = tmp_path / f"{color}.mp4"
         ffmpeg.run(
@@ -212,11 +282,11 @@ def test_render_centred_dissolve(tmp_path, speed, audio, background):
                 "-f",
                 "lavfi",
                 "-i",
-                f"color={color}:s=160x90:r=30:d=2",
+                f"color={color}:s=160x90:r=30:d={duration}",
                 "-f",
                 "lavfi",
                 "-i",
-                "sine=frequency=440:duration=2",
+                f"sine=frequency=440:duration={duration}",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -236,6 +306,7 @@ def test_render_centred_dissolve(tmp_path, speed, audio, background):
         Clip(shot_id="red", in_s=0, out_s=2, speed=speed),
         Clip(
             shot_id="blue",
+            audio=mode,
             in_s=0,
             out_s=2,
             speed=speed,
@@ -275,6 +346,11 @@ def test_render_centred_dissolve(tmp_path, speed, audio, background):
         assert _rms_db(out, 2 / speed - 0.04, 0.08) > -35
     else:
         assert _rms_db(out, 2 / speed - 0.04, 0.08) < -60
+    if mode == "mute":
+        before = _rms_db(out, 2 / speed - 0.6, 0.1)
+        late = _rms_db(out, 2 / speed + 0.1, 0.08)
+        assert late < before - 6  # fades toward silence within the dissolve window
+        assert _rms_db(out, 2 / speed + 0.4, 0.2) < -60
     cached = list((tmp_path / "preview" / "segments").glob("*.mov"))
     assert len(cached) == 3
     mtimes = [p.stat().st_mtime_ns for p in cached]
@@ -298,6 +374,44 @@ def _rms_db(path, start: float, dur: float) -> float:
     pcm = array("h", raw)
     rms = math.sqrt(sum(x * x for x in pcm) / max(1, len(pcm))) / 32768
     return 20 * math.log10(rms + 1e-9)
+
+
+def _astats_db(path: Path, start: float, duration: float) -> float:
+    stats = ffmpeg.run(
+        "ffmpeg",
+        ["-v", "error", "-ss", str(start), "-t", str(duration), "-i", str(path),
+         "-vn", "-af", "astats=metadata=1:reset=0,"
+         "ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-", "-f", "null", "-"],
+    )  # fmt: skip
+    levels = re.findall(r"lavfi\.astats\.Overall\.RMS_level=([^\s]+)", stats)
+    assert levels, "astats did not measure any audio samples"
+    return float(levels[-1])
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.parametrize("speed", [1.0, 2.0])
+@pytest.mark.parametrize("gain", [-12.0, -6.0])
+def test_render_camera_audio_modes(
+    make_clip: Callable[..., Path], tmp_path: Path, speed: float, gain: float
+) -> None:
+    path = make_clip("tone.mp4", duration=4, size="160x90")  # lavfi 440 Hz sine with video
+    asset = probe_asset(path).model_copy(update={"proxy_path": str(path)})
+    shot = Shot(shot_id="tone", asset_id=asset.asset_id, start_s=0, end_s=4, quality=Q)
+    params = PreviewParams(short_side=90, subtitles=False)
+    assert params.duck_gain_db == -12
+    if gain != -12:
+        params = params.model_copy(update={"duck_gain_db": gain})
+    levels = {}
+    modes: tuple[AudioMode, ...] = ("keep", "mute", "duck")
+    for mode in modes:
+        edl = _edl(Clip(shot_id="tone", in_s=0, out_s=4, speed=speed, audio=mode))
+        out = render_preview(
+            edl, [shot], [asset], tmp_path, tmp_path / f"{mode}.mp4", params=params
+        )
+        levels[mode] = _astats_db(out, 0.25, edl.total_duration_s - 0.5)
+    assert levels["keep"] > -35
+    assert levels["mute"] < -80
+    assert levels["duck"] - levels["keep"] == pytest.approx(gain, abs=2)
 
 
 def _footage(make_clip, tmp_path):
@@ -342,7 +456,8 @@ def test_render_mixed_orientation_speed_and_silence(make_clip, tmp_path):
 
 
 @pytest.mark.ffmpeg
-def test_render_with_music_and_missing_track(make_clip, tmp_path):
+@pytest.mark.parametrize("shot_id,mode", [("l_000", "keep"), ("p_000", "mute")])
+def test_render_with_music_and_missing_track(make_clip, tmp_path, shot_id, mode):
     ws, assets, shots = _footage(make_clip, tmp_path)
     bgm = tmp_path / "bgm.m4a"
     ffmpeg.run(
@@ -350,7 +465,8 @@ def test_render_with_music_and_missing_track(make_clip, tmp_path):
         ["-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=330:duration=10"]
         + ["-c:a", "aac", str(bgm)],
     )
-    edl = _edl(Clip(shot_id="l_000", in_s=0, out_s=3), music=[MusicCue(track_id="bgm", gain_db=-6)])
+    edl = _edl(Clip(shot_id=shot_id, in_s=0, out_s=3, audio=mode),
+               music=[MusicCue(track_id="bgm", gain_db=-6)])  # fmt: skip
     p = PreviewParams(subtitles=False, music_fade_out_s=0.5)
     out = render_preview(edl, shots, assets, ws, tmp_path / "m.mp4", music={"bgm": bgm}, params=p)
     assert "subtitle" not in _probe(out)

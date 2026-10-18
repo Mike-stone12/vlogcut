@@ -144,7 +144,9 @@ explainable, and it would break principle 2.
 - Preview mp4 (`render/preview.py`): FFmpeg on proxies (fast, low-res); cached clip
   bodies and centred dissolves per `Clip.transition_in`, joined with video copy;
   linear audio crossfades; debug subtitle track with source + reason per clip.
-  Planned: per-clip audio mode (keep / mute / duck under music)
+  Per-clip camera audio: keep at normal level, mute to silence, or duck by a fixed
+  render gain (default -12 dB), applied to each source before dissolve crossfades.
+  Music remains audible independently of clip audio modes.
 - Interchange: an OpenTimelineIO timeline is the canonical export; JianYing and FCPXML
   are exporters from it, so a change in one app's format never reaches the planner
 - JianYing draft: `pyJianYingDraft` (generation only; final export happens in the
@@ -193,11 +195,15 @@ EDL total. The preview renders overlapping source handles, holding edge frames
 when an asset ends or has not started. `profile_from_edl` measures the
 dissolve share over the `len(clips) - 1` boundaries (and still rejects single clips).
 
+`Clip.audio` is `keep` (camera audio at normal level), `mute` (camera audio replaced
+by silence; music still plays), or `duck` (camera audio attenuated by a fixed gain
+to sit under music). It defaults to `keep`, so old EDL JSON without the field still
+loads with the same audio behaviour.
+
 Planned additions (not yet in `schemas.py`; each lands with the module that needs it):
 
 | Field / model | Why |
 |---|---|
-| `Clip.audio` (keep / mute / duck) | how voice sits under music is part of a style |
 | `MusicCue.end_s`, ducking params | music mixing needs an end and a level under speech |
 | `Shot.kind` (talking / broll), `Shot.cut_points` | structure dimension; code-proposed in/out candidates |
 | `StyleProfile.structure`, `.cold_open_clips` | the "grammar" dimensions |
@@ -523,6 +529,16 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   samples before `atempo`, avoiding its unsigned-silence DC offset. Dissolve keys
   include both source spans, speeds, padding, duration, canvas and render params.
   Subtitle cues still cover each full resolved clip span.
+
+- 2026-10-20: per-clip audio — **schema change**: `Clip.audio` adds `keep` (default),
+  `mute`, and `duck`; old EDLs still load. `PreviewParams.duck_gain_db` defaults to
+  -12 dB. Modes apply in clip bodies and separately to each dissolve source before
+  the audio crossfade; mute uses signed-sample silence, including at non-unit speeds.
+  Existing 30 ms fades, video output, frame snapping and timeline durations stay
+  unchanged. Cache keys include non-default audio modes and the duck gain only for
+  duck; keep keys remain byte-identical, including dissolve keys. The planner still
+  emits `keep`; style assignment and measurement, `MusicCue.end_s` and music ducking
+  parameters remain future work.
 
 ## Open questions
 

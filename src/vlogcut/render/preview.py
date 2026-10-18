@@ -40,6 +40,7 @@ class PreviewParams(BaseModel):
     fps: int = Field(default=30, gt=0)
     background: Literal["black", "blur"] = "black"
     audio_fade_s: float = Field(default=0.03, ge=0)
+    duck_gain_db: float = Field(default=-12.0, le=0, allow_inf_nan=False)
     music_fade_out_s: float = Field(default=2.0, ge=0)
     subtitles: bool = True
     crf: int = Field(default=26, ge=0, le=51)
@@ -220,11 +221,12 @@ def _filters(
     video += f",setsar=1,format=yuv420p[v{index}]"
     fade = min(params.audio_fade_s, d / 2)
     audio = ",".join(
-        (["aformat=sample_fmts=s16"] if not seg.asset.has_audio else [])
+        (["aformat=sample_fmts=s16"] if not seg.asset.has_audio or seg.clip.audio == "mute" else [])
         + ["asetpts=PTS-STARTPTS", *atempo_chain(seg.clip.speed)]
         + [f"aresample={AUDIO_RATE}", "aformat=sample_fmts=s16:channel_layouts=stereo"]
         + ([f"adelay={round(seg.pad_start_s * AUDIO_RATE)}S:all=1"] if seg.pad_start_s else [])
         + ["apad", f"atrim=0:{d:.6f}"]
+        + ([f"volume={params.duck_gain_db:.2f}dB"] if seg.clip.audio == "duck" else [])
         + ([f"afade=t=in:d={fade:.3f}"] if fade and seg.fade_in else [])
         + ([f"afade=t=out:st={d - fade:.6f}:d={fade:.3f}"] if fade and seg.fade_out else [])
     )
@@ -238,7 +240,7 @@ def segment_args(seg: Segment, canvas: tuple[int, int], params: PreviewParams, o
         args += ["-ss", f"{source.src_start_s:.3f}", "-t", f"{source.src_dur_s:.3f}"]
         args += ["-i", str(source.asset.proxy_path)]
         audio_index = index
-        if not source.asset.has_audio:
+        if not source.asset.has_audio or source.clip.audio == "mute":
             audio_index += 1
             args += ["-f", "lavfi", "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo"]
         filters.append(_filters(source, canvas, params, index, audio_index))
@@ -266,6 +268,11 @@ def segment_key(seg: Segment, canvas: tuple[int, int], params: PreviewParams) ->
         f"{seg.src_dur_s:.3f}", f"{seg.out_dur_s:.6f}", f"{seg.clip.speed:.4f}", canvas,
         params.fps, params.background, params.audio_fade_s, params.crf,
     ]  # fmt: skip
+    # Keep legacy keys byte-identical, including recursive dissolve source keys.
+    if seg.clip.audio != "keep":
+        parts += ["audio", seg.clip.audio]
+        if seg.clip.audio == "duck":
+            parts += [params.duck_gain_db]
     if not seg.asset.has_audio and seg.clip.speed != 1.0:
         parts += ["signed-silence-v1"]  # atempo on unsigned silence can add a DC offset
     if not seg.fade_in or not seg.fade_out or seg.incoming:
