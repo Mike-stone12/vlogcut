@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import json
+
 import pytest
+from pydantic import ValidationError
 
 from vlogcut.analyze import shots as shots_mod
+from vlogcut.schemas import MediaAsset
 from vlogcut.style import ReferenceParams, StyleError, build_profile, load_profile
+from vlogcut.style import profile as profile_mod
 from vlogcut.style.profile import (
     ReferenceCuts,
     aggregate,
     analyze_reference,
     duration_stats,
     shot_durations,
+    transition_mix,
 )
 
 # ---------------------------------------------------------------------------
@@ -35,10 +41,12 @@ def test_duration_stats_needs_at_least_two_shots():
         duration_stats([5.0])
 
 
-def _ref(name: str, duration: float, cuts: list[float]) -> ReferenceCuts:
+def _ref(
+    name: str, duration: float, cuts: list[float], dissolves: list[float] | None = None
+) -> ReferenceCuts:
     return ReferenceCuts(
         asset_id=name, source=f"{name}.mp4", duration_s=duration, params=ReferenceParams(),
-        cuts=cuts,
+        cuts=cuts, dissolve_cuts=dissolves or [],
     )  # fmt: skip
 
 
@@ -57,6 +65,124 @@ def test_aggregate_pools_shots_and_rates_by_total_time():
 def test_aggregate_without_references_raises():
     with pytest.raises(StyleError, match="reference"):
         aggregate([], ReferenceParams())
+
+
+def test_aggregate_pools_transition_counts():
+    a = _ref("a", 60, [10, 20, 30], [10, 20])
+    b = _ref("b", 120, [60])
+    p = aggregate([a, b], ReferenceParams())
+    assert p.transitions.hard_cut == pytest.approx(0.5)
+    assert p.transitions.dissolve == pytest.approx(2 / 4)
+    assert p.cuts_per_min == pytest.approx(4 / 3)
+    assert "50.0% dissolves" in p.notes
+
+
+@pytest.mark.parametrize("disabled_reference", [False, True])
+def test_aggregate_transitions_unmeasured_when_detection_disabled(disabled_reference):
+    a = _ref("a", 60, [10], [10])
+    b = _ref("b", 60, [20])
+    params = ReferenceParams(dissolves=disabled_reference)
+    if disabled_reference:
+        b.params = ReferenceParams(dissolves=False)
+    p = aggregate([a, b], params)
+    assert p.transitions is None
+    assert "dissolves" not in p.notes
+
+
+def test_aggregate_transition_counts_use_surviving_rounded_boundaries():
+    # The 2 s boundary disappears with its sliver; rounding retains the other dissolve.
+    ref = _ref("a", 8, [2, 2.1, 5.0000001], [2, 5.0000001])
+    p = aggregate([ref], ReferenceParams())
+    assert p.cuts_per_min == pytest.approx(2 / (8 / 60))
+    assert p.transitions.dissolve == pytest.approx(1 / 2)
+
+
+def test_reference_dissolves_must_be_a_subset_of_cuts():
+    with pytest.raises(ValidationError, match="subset"):
+        _ref("a", 60, [10], [20])
+
+
+def test_transition_mix_handles_unmeasured_and_pooled_counts():
+    assert transition_mix(0, 0) is None
+    assert transition_mix(None, 5) is None
+    mix = transition_mix(1, 4)
+    assert mix.dissolve == pytest.approx(0.25)
+    assert mix.hard_cut == pytest.approx(0.75)
+
+
+@pytest.mark.parametrize("cuts", [[], [0.1]])
+@pytest.mark.parametrize("detection", [False, True])
+def test_aggregate_zero_surviving_cuts_raises(cuts, detection):
+    ref = _ref("a", 60, cuts, cuts)
+    for refs in ([ref], [ref, _ref("b", 120, [])]):
+        with pytest.raises(StyleError, match="two shots"):
+            aggregate(refs, ReferenceParams(dissolves=detection))
+
+
+@pytest.mark.parametrize("rounding", [0.0, 0.0000005])
+def test_analyze_reference_records_only_surviving_dissolves(tmp_path, monkeypatch, rounding):
+    asset = MediaAsset(
+        asset_id="a",
+        path="a.mp4",
+        proxy_path="proxy.mp4",
+        duration_s=60,
+        fps=30,
+        width=64,
+        height=64,
+    )
+    monkeypatch.setattr(profile_mod, "probe_asset", lambda path: asset)
+    monkeypatch.setattr(profile_mod, "make_proxy", lambda asset, ws: asset)
+    monkeypatch.setattr(shots_mod, "detect_cuts", lambda *a, **k: [10])
+    monkeypatch.setattr(profile_mod.transitions, "load_frames", lambda path: None)
+    found = [(10.05, 10.15), (19, 21)]
+    monkeypatch.setattr(profile_mod.transitions, "find_dissolves", lambda *a: found)
+
+    def merge_cuts(hard, dissolves, min_gap_s):
+        assert hard == [10] and dissolves == found
+        assert abs(sum(dissolves[0]) / 2 - hard[0]) < min_gap_s
+        # Simulate a merger dropping the nearby midpoint and rounding the survivor.
+        return [10, 20 + rounding]
+
+    monkeypatch.setattr(profile_mod.transitions, "merge_cuts", merge_cuts)
+    record = analyze_reference("a.mp4", tmp_path)
+    assert record.cuts == [10, 20 + rounding]
+    assert record.dissolve_cuts == [record.cuts[1]]
+    cached = tmp_path / "style" / "a.cuts.json"
+    assert ReferenceCuts.model_validate_json(cached.read_text(encoding="utf-8")) == record
+
+
+@pytest.mark.parametrize("detection", [False, True])
+def test_old_reference_cache_is_recomputed(tmp_path, monkeypatch, detection):
+    params = ReferenceParams(dissolves=detection)
+    old = _ref("a", 60, [10]).model_dump(exclude={"dissolve_cuts"})
+    old["params"] = params.model_dump()
+    cache = tmp_path / "style" / "a.cuts.json"
+    cache.parent.mkdir()
+    cache.write_text(json.dumps(old), encoding="utf-8")
+    asset = MediaAsset(
+        asset_id="a",
+        path="a.mp4",
+        proxy_path="proxy.mp4",
+        duration_s=60,
+        fps=30,
+        width=64,
+        height=64,
+    )
+    monkeypatch.setattr(profile_mod, "probe_asset", lambda path: asset)
+    monkeypatch.setattr(profile_mod, "make_proxy", lambda asset, ws: asset)
+    monkeypatch.setattr(shots_mod, "detect_cuts", lambda *a, **k: [10, 20])
+    monkeypatch.setattr(
+        profile_mod.transitions,
+        "load_frames",
+        lambda path: None if detection else pytest.fail("dissolve detection disabled"),
+    )
+    monkeypatch.setattr(profile_mod.transitions, "find_dissolves", lambda *a: [(19, 21)])
+    record = analyze_reference("a.mp4", tmp_path, params)
+    assert record.cuts == [10, 20]
+    assert record.dissolve_cuts == ([20] if detection else [])
+    assert ReferenceCuts.model_validate_json(cache.read_text(encoding="utf-8")) == record
+    monkeypatch.setattr(shots_mod, "detect_cuts", lambda *a, **k: pytest.fail("re-detected"))
+    assert analyze_reference("a.mp4", tmp_path, params) == record
 
 
 def test_load_profile_round_trips_and_rejects_bad_files(tmp_path):

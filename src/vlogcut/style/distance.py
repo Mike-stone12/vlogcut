@@ -3,7 +3,7 @@
 Pacing dimensions (shot-duration p10 / median / p90, cuts per minute) are positive ratio
 quantities: a 1 s shot next to a 2 s one is as different as 4 s next to 8 s. Each is
 compared as |log2(a / b)|, so the unit is octaves and 1.0 means twice as fast or twice as
-slow. Ratio dimensions in [0, 1] (`beat_aligned_ratio`, `speech_ratio`) use the absolute
+slow. Ratio dimensions in [0, 1] (`beat_aligned_ratio`, `speech_ratio`, `dissolve`) use the absolute
 difference. A dimension that either side has not measured (`None`) is skipped and listed
 in `StyleDistance.unmeasured`. Dimensions are equally weighted until the eval set says
 otherwise. Pure functions, no numpy.
@@ -18,8 +18,8 @@ from pydantic import BaseModel, Field
 from vlogcut.schemas import EDL, StyleProfile
 from vlogcut.style.profile import profile_from_durations
 
-LOG_DIMS = ("p10", "median", "p90", "cuts_per_min")  # > 0, compared by |log2 ratio|
-RATIO_DIMS = ("beat_aligned_ratio", "speech_ratio")  # in [0, 1], compared by |difference|
+LOG_DIMS = ("p10", "median", "p90", "cuts_per_min")  # positive; compared by |log2 ratio|
+RATIO_DIMS = ("beat_aligned_ratio", "speech_ratio", "dissolve")  # |difference| in [0, 1]
 _LABELS = {
     "p10": "p10 shot s",
     "median": "median shot s",
@@ -27,6 +27,7 @@ _LABELS = {
     "cuts_per_min": "cuts/min",
     "beat_aligned_ratio": "beat-aligned",
     "speech_ratio": "speech ratio",
+    "dissolve": "dissolve",
 }
 
 
@@ -48,6 +49,7 @@ def dimensions(profile: StyleProfile) -> dict[str, float | None]:
         "cuts_per_min": profile.cuts_per_min,
         "beat_aligned_ratio": profile.beat_aligned_ratio,
         "speech_ratio": profile.speech_ratio,
+        "dissolve": profile.transitions.dissolve if profile.transitions is not None else None,
     }
 
 
@@ -69,7 +71,8 @@ def profile_distance(a: StyleProfile, b: StyleProfile) -> StyleDistance:
 
 def profile_from_edl(edl: EDL, source: str = "edl") -> StyleProfile:
     """The pacing a planned cut would measure as, with nothing rendered or detected:
-    every clip is one shot of its timeline duration."""
+    every clip is one shot of its timeline duration. Transitions stay unmeasured until
+    clips carry transition information."""
     return profile_from_durations([[c.timeline_duration_s for c in edl.clips]], [source])
 
 
@@ -83,6 +86,15 @@ def format_profile(name: str, profile: StyleProfile) -> str:
     for dim, value in dimensions(profile).items():
         if value is not None:
             rows.append(f"{_LABELS[dim]:<14}{value:>9.2f}")
+    mix = profile.transitions
+    rows.append(
+        "transitions   "
+        + (
+            f"hard cut {mix.hard_cut:.1%}, dissolve {mix.dissolve:.1%}"
+            if mix is not None
+            else "not measured"
+        )
+    )
     if profile.source_refs:
         rows.append("sources       " + ", ".join(profile.source_refs))
     return "\n".join(rows)

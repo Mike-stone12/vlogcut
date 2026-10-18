@@ -1,7 +1,7 @@
-"""Style profile from reference videos: finished edits -> pacing statistics.
+"""Style profile from reference videos: finished edits -> pacing and transitions.
 
 PoC slice: the shot-duration distribution (p10 / median / p90) and cuts per minute,
-pooled over all references. Structure, transition, beat and speech dimensions come later.
+pooled over all references, plus their transition mix. Structure, beat and speech come later.
 
 References are finished edits, so this does not reuse `analyze.detect_shots`: that step
 splits long shots into equal parts (which would destroy the duration distribution) and
@@ -17,11 +17,11 @@ import statistics
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from vlogcut.analyze import shots, transitions
 from vlogcut.ingest import make_proxy, probe_asset
-from vlogcut.schemas import DurationStats, StyleProfile
+from vlogcut.schemas import DurationStats, StyleProfile, TransitionMix
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +46,13 @@ class ReferenceCuts(BaseModel):
     duration_s: float = Field(gt=0)
     params: ReferenceParams
     cuts: list[float]  # hard cuts + dissolve midpoints, seconds
+    dissolve_cuts: list[float]  # required: old caches must be recomputed
+
+    @model_validator(mode="after")
+    def _dissolves_are_cuts(self) -> ReferenceCuts:
+        if not set(self.dissolve_cuts).issubset(self.cuts):
+            raise ValueError("dissolve_cuts must be a subset of cuts")
+        return self
 
 
 class StyleError(RuntimeError):
@@ -81,13 +88,25 @@ def summarize(
     )
 
 
+def transition_mix(n_dissolves: int | None, n_cuts: int) -> TransitionMix | None:
+    """Pooled shares of surviving cuts; missing detection or no cuts is unmeasured."""
+    if n_dissolves is None or n_cuts == 0:
+        return None
+    dissolve = n_dissolves / n_cuts
+    return TransitionMix(hard_cut=1 - dissolve, dissolve=dissolve)
+
+
 def profile_from_durations(
-    per_ref: Sequence[Sequence[float]], source_refs: Sequence[str]
+    per_ref: Sequence[Sequence[float]],
+    source_refs: Sequence[str],
+    *,
+    n_dissolves: int | None = None,
 ) -> StyleProfile:
     """Pool finished edits into one profile: a single duration distribution over all
     shots, and cuts per minute from the totals, so a short reference does not weigh as
     much as a long one. Each inner sequence is one edit's consecutive shot lengths (it
-    sums to the edit's duration and has one cut less than it has shots)."""
+    sums to the edit's duration and has one cut less than it has shots).
+    `n_dissolves` counts surviving dissolve boundaries; None means not measured."""
     if not per_ref:
         raise StyleError("no references given")
     durations = [d for lengths in per_ref for d in lengths]
@@ -97,19 +116,37 @@ def profile_from_durations(
     total_s = sum(durations)
     stats = duration_stats(durations)
     cuts_per_min = n_cuts / (total_s / 60.0)
+    mix = transition_mix(n_dissolves, n_cuts)
+    notes = summarize(len(per_ref), total_s, n_cuts, stats, cuts_per_min)
+    if mix is not None:
+        notes += f"; {mix.dissolve:.1%} dissolves"
     return StyleProfile(
         source_refs=list(source_refs),
         shot_duration_s=stats,
         cuts_per_min=cuts_per_min,
-        notes=summarize(len(per_ref), total_s, n_cuts, stats, cuts_per_min),
+        transitions=mix,
+        notes=notes,
     )
 
 
 def aggregate(refs: Sequence[ReferenceCuts], params: ReferenceParams) -> StyleProfile:
     """Detected cuts of several references -> one pooled profile."""
+    spans = [
+        shots.merge_short(shots.cuts_to_spans(r.cuts, r.duration_s), params.min_shot_s)
+        for r in refs
+    ]
+    n_dissolves = None
+    if params.dissolves and all(r.params.dissolves for r in refs):
+        # cuts_to_spans rounds to microseconds; only surviving interior boundaries
+        # count toward both cuts/min and the transition mix.
+        n_dissolves = sum(
+            len({end for _, end in ss[:-1]} & {round(c, 6) for c in r.dissolve_cuts})
+            for r, ss in zip(refs, spans, strict=True)
+        )
     return profile_from_durations(
-        [shot_durations(r.cuts, r.duration_s, params.min_shot_s) for r in refs],
+        [[end - start for start, end in ss] for ss in spans],
         [r.source for r in refs],
+        n_dissolves=n_dissolves,
     )
 
 
@@ -138,14 +175,21 @@ def analyze_reference(
     cuts = shots.detect_cuts(
         asset.proxy_path, threshold=params.threshold, min_scene_len_s=params.min_shot_s
     )
+    dissolve_cuts = []
     if params.dissolves:
         found = transitions.find_dissolves(
             transitions.load_frames(asset.proxy_path), transitions.SAMPLE_FPS
         )
         cuts = transitions.merge_cuts(cuts, found, params.min_shot_s)
+        midpoints = [(start + end) / 2 for start, end in found]
+        # Keep exact merged values, once each, so removed midpoints cannot enter
+        # the cache. The merger emits midpoints unchanged; allow microsecond rounding.
+        dissolve_cuts = [
+            cut for cut in dict.fromkeys(cuts) if any(abs(cut - mid) <= 1e-6 for mid in midpoints)
+        ]
     record = ReferenceCuts(
         asset_id=asset.asset_id, source=str(path), duration_s=asset.duration_s, params=params,
-        cuts=cuts,
+        cuts=cuts, dissolve_cuts=dissolve_cuts,
     )  # fmt: skip
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = cache_path.with_suffix(".part")
@@ -160,7 +204,7 @@ def build_profile(
     params: ReferenceParams | None = None,
     progress: Progress = log.info,
 ) -> StyleProfile:
-    """Reference videos -> `StyleProfile` (pacing only, for now)."""
+    """Reference videos -> `StyleProfile` (pacing and transition mix)."""
     params = params or ReferenceParams()
     refs = []
     for i, path in enumerate(paths, 1):

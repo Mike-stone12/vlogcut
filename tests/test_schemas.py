@@ -3,7 +3,15 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from vlogcut.schemas import EDL, Clip, DurationStats, QualityFlags, Shot, StyleProfile
+from vlogcut.schemas import (
+    EDL,
+    Clip,
+    DurationStats,
+    QualityFlags,
+    Shot,
+    StyleProfile,
+    TransitionMix,
+)
 
 
 def test_shot_duration_and_bounds():
@@ -51,3 +59,28 @@ def test_style_profile_unmeasured_ratios_are_none():
     assert profile.beat_aligned_ratio is None and profile.speech_ratio is None
     with pytest.raises(ValidationError):
         StyleProfile(shot_duration_s=stats, cuts_per_min=20, speech_ratio=1.5)
+
+
+@pytest.mark.parametrize("hard,dissolve", [(0.2, 0.3), (-0.1, 1.1), (1.1, -0.1), (0.5, 0.500002)])
+def test_transition_mix_rejects_invalid_shares(hard, dissolve):
+    with pytest.raises(ValidationError):
+        TransitionMix(hard_cut=hard, dissolve=dissolve)
+
+
+@pytest.mark.parametrize("hard,dissolve", [(1, 0), (0, 1), (0.75, 0.25), (0.5, 0.5000005)])
+def test_transition_mix_accepts_shares_within_tolerance(hard, dissolve):
+    assert TransitionMix(hard_cut=hard, dissolve=dissolve).dissolve == dissolve
+
+
+def test_old_profile_json_has_unmeasured_transitions():
+    profile = StyleProfile.model_validate_json(
+        '{"shot_duration_s": {"p10": 1, "median": 2, "p90": 4}, "cuts_per_min": 20}'
+    )
+    assert profile.transitions is None
+
+
+@pytest.mark.parametrize("rate", [0, -1])
+def test_style_profile_requires_positive_cut_rate(rate):
+    stats = DurationStats(p10=60, median=60, p90=60)
+    with pytest.raises(ValidationError):
+        StyleProfile(shot_duration_s=stats, cuts_per_min=rate)

@@ -94,7 +94,8 @@ flags are skipped: references are finished edits), then aggregate:
   (transition counts between shot kinds), montage bursts (runs of short shots), cold
   open present or not. Pacing alone reads as a speed slider; structure is what makes a
   cut recognisably someone's.
-- Transitions: share of hard cuts / dissolves / fades (from `analyze/transitions.py`)
+- Transitions: share of hard cuts / dissolves (from `analyze/transitions.py`); fades
+  through black currently count as two dissolves
 - Audio: speech-over-music ratio, whether clip audio is kept under music
 - Look: brightness / saturation / warmth stats (for later matching)
 - Text: subtitle presence/position/size (OCR; v1.5)
@@ -179,6 +180,10 @@ Changing a schema means updating this file and the tests in the same change.
 
 `StyleProfile.beat_aligned_ratio` and `speech_ratio` are `None` until the beat / speech
 analysis exists: `None` means "not measured", which is not the same as 0.
+`StyleProfile.transitions: TransitionMix | None = None` follows the same convention:
+`hard_cut` and `dissolve` are shares in [0, 1], summing to 1 within 1e-6. Old profile
+JSON without this field still loads. The mix is unmeasured when dissolve detection is off
+or no cuts survive merging. Profiles still require at least one cut to describe pacing.
 
 Planned additions (not yet in `schemas.py`; each lands with the module that needs it):
 
@@ -188,7 +193,7 @@ Planned additions (not yet in `schemas.py`; each lands with the module that need
 | `Clip.audio` (keep / mute / duck) | how voice sits under music is part of a style |
 | `MusicCue.end_s`, ducking params | music mixing needs an end and a level under speech |
 | `Shot.kind` (talking / broll), `Shot.cut_points` | structure dimension; code-proposed in/out candidates |
-| `StyleProfile.structure`, `.transitions`, `.cold_open_clips` | the "grammar" dimensions |
+| `StyleProfile.structure`, `.cold_open_clips` | the "grammar" dimensions |
 | `Run` manifest (inputs fingerprint → outputs) | EDL file names collide once profile version, brief, variant and model all vary |
 | `Feedback`, `PreferencePair` | the flywheel must be logged from the first real use |
 
@@ -277,6 +282,7 @@ unrelated footage in a way viewers recognise. Protocol:
 - [x] Week 2 · style distance + round-trip eval (`style/distance.py`,
       `vlogcut style show / diff`, `tests/test_style_distance.py`)
 - [x] Week 2 · rules planner reproduces the profile's shot-length distribution
+- [x] Week 3 · style: transition mix from references (`style/profile.py`)
 
 Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 
@@ -291,7 +297,8 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Style distance (`style/distance.py`): per dimension |log2(a / b)| for the positive
   pacing quantities (shot-duration p10 / median / p90, cuts per minute), so the unit is
   octaves (1.0 = twice as fast or slow); absolute difference for the ratio dimensions in
-  [0, 1]; a dimension unmeasured on either side is skipped and reported; equal weights
+  [0, 1], including the new `dissolve` ratio dimension (`transitions.dissolve`);
+  a dimension unmeasured on either side is skipped and reported; equal weights
   until the eval set says otherwise. `vlogcut style diff a.json b.json` prints it.
 - ~10 footage sets, each with reference videos
 - Metrics: style distance (shot-duration distribution distance, beat-alignment gap,
@@ -462,6 +469,20 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   (previously ≈ 0.26); default pacing at 60 s gives ≈ 0.03. Slow-reference distance
   only improves ≈ 0.33 → 0.18 because roughly 3 s footage cannot fit its 4.7 s p90.
   These are simulation figures, not measurements from real footage.
+
+- 2026-10-18: transition mix — **schema change**: optional `StyleProfile.transitions`
+  holds `TransitionMix(hard_cut, dissolve)`; absent fields in old profiles mean not
+  measured. Shares pool surviving dissolve boundaries / total surviving boundaries
+  across references, after short-shot merging, matching the cuts/min denominator.
+  Fades through black count as two dissolves (known classification gap; no fade field).
+  If any reference has dissolve detection off, or there are no surviving cuts, the
+  mix is `None` (a defensive guard; zero-cut references still raise the existing
+  pacing error). Reference caches
+  require `dissolve_cuts` (a subset of `cuts`); validation failure invalidates old
+  records and reruns detection instead of assuming zero dissolves. Style distance
+  adds the absolute difference of dissolve shares, skipped when either is unmeasured.
+  EDL profiles stay unmeasured until clips carry transitions; planning and rendering
+  are unchanged.
 
 ## Open questions
 

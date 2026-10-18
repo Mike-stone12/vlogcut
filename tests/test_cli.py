@@ -135,11 +135,21 @@ def test_style_show_and_diff(tmp_path, capsys):
     assert cli.main(["style", "show", str(fast)]) == 0
     out = capsys.readouterr().out
     assert "handmade" in out and "cuts/min" in out and "28.80" in out
+    assert "transitions   not measured" in out
     assert cli.main(["style", "diff", str(fast), str(slow)]) == 0
     out = capsys.readouterr().out
     assert "octaves" in out and "fast.json" in out and "slow.json" in out
     for dim in ("p10", "median", "p90", "cuts/min"):
         assert dim in out
+
+
+def test_style_show_measured_transitions(tmp_path, capsys):
+    path = _write_profile(tmp_path / "mix.json", 1, 2, 4, 20)
+    profile = json.loads(path.read_text(encoding="utf-8"))
+    profile["transitions"] = {"hard_cut": 0.75, "dissolve": 0.25}
+    path.write_text(json.dumps(profile), encoding="utf-8")
+    assert cli.main(["style", "show", str(path)]) == 0
+    assert "transitions   hard cut 75.0%, dissolve 25.0%" in capsys.readouterr().out
 
 
 def test_style_show_and_diff_errors_are_one_line(tmp_path, capsys):
