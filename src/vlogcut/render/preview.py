@@ -226,7 +226,7 @@ def _filters(
         + [f"aresample={AUDIO_RATE}", "aformat=sample_fmts=s16:channel_layouts=stereo"]
         + ([f"adelay={round(seg.pad_start_s * AUDIO_RATE)}S:all=1"] if seg.pad_start_s else [])
         + ["apad", f"atrim=0:{d:.6f}"]
-        + ([f"volume={params.duck_gain_db}dB"] if seg.clip.audio == "duck" else [])
+        + ([f"volume={params.duck_gain_db:.2f}dB"] if seg.clip.audio == "duck" else [])
         + ([f"afade=t=in:d={fade:.3f}"] if fade and seg.fade_in else [])
         + ([f"afade=t=out:st={d - fade:.6f}:d={fade:.3f}"] if fade and seg.fade_out else [])
     )

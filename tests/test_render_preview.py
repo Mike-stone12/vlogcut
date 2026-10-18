@@ -165,9 +165,9 @@ def test_audio_modes_change_source_filters_and_cache_keys(incoming: bool) -> Non
         assert (keys[-1] != changed_gain) == (mode == "duck")
         args = segment_args(blend, (540, 960), params, "blend.mov")
         graph = args[args.index("-filter_complex") + 1]
-        assert graph.count("volume=-12.0dB") == (mode == "duck")
+        assert graph.count("volume=-12.00dB") == (mode == "duck")
         if mode == "duck":
-            assert graph.index("volume=-12.0dB") < graph.index("acrossfade=")
+            assert graph.index("volume=-12.00dB") < graph.index("acrossfade=")
         if mode == "mute":
             assert "anullsrc" in " ".join(args)
             assert "aformat=sample_fmts=s16,asetpts=PTS-STARTPTS,atempo=2.000000" in graph
@@ -394,7 +394,7 @@ def _astats_db(path: Path, start: float, duration: float) -> float:
 def test_render_camera_audio_modes(
     make_clip: Callable[..., Path], tmp_path: Path, speed: float, gain: float
 ) -> None:
-    path = make_clip(duration=4, size="160x90")  # lavfi 440 Hz sine with video
+    path = make_clip("tone.mp4", duration=4, size="160x90")  # lavfi 440 Hz sine with video
     asset = probe_asset(path).model_copy(update={"proxy_path": str(path)})
     shot = Shot(shot_id="tone", asset_id=asset.asset_id, start_s=0, end_s=4, quality=Q)
     params = PreviewParams(short_side=90, subtitles=False)

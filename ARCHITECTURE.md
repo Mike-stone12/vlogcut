@@ -530,7 +530,7 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   include both source spans, speeds, padding, duration, canvas and render params.
   Subtitle cues still cover each full resolved clip span.
 
-- 2026-10-18: per-clip audio — **schema change**: `Clip.audio` adds `keep` (default),
+- 2026-10-20: per-clip audio — **schema change**: `Clip.audio` adds `keep` (default),
   `mute`, and `duck`; old EDLs still load. `PreviewParams.duck_gain_db` defaults to
   -12 dB. Modes apply in clip bodies and separately to each dissolve source before
   the audio crossfade; mute uses signed-sample silence, including at non-unit speeds.
