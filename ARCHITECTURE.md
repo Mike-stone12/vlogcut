@@ -141,10 +141,10 @@ explainable, and it would break principle 2.
   rule-based fallback fix
 
 ### 6. Render / export
-- Preview mp4 (`render/preview.py`): FFmpeg on proxies (fast, low-res); cached per-clip
-  segments joined losslessly; debug subtitle track with source + reason per clip.
-  Planned: dissolves per `Clip.transition_in`, per-clip audio mode (keep / mute
-  / duck under music)
+- Preview mp4 (`render/preview.py`): FFmpeg on proxies (fast, low-res); cached clip
+  bodies and centred dissolves per `Clip.transition_in`, joined with video copy;
+  linear audio crossfades; debug subtitle track with source + reason per clip.
+  Planned: per-clip audio mode (keep / mute / duck under music)
 - Interchange: an OpenTimelineIO timeline is the canonical export; JianYing and FCPXML
   are exporters from it, so a change in one app's format never reaches the planner
 - JianYing draft: `pyJianYingDraft` (generation only; final export happens in the
@@ -189,8 +189,8 @@ or no cuts survive merging. Profiles still require at least one cut to describe 
 `Transition.kind` is `cut` or `dissolve`; `duration_s` is 0 for a cut and strictly
 positive for a dissolve. The first EDL clip must enter with a cut. A dissolve is
 centred on the boundary: it changes no clip in/out points, timeline durations, or
-EDL total. Media overlap is a renderer concern to be handled later; the preview
-currently renders all boundaries as hard cuts. `profile_from_edl` measures the
+EDL total. The preview renders overlapping source handles, holding edge frames
+when an asset ends or has not started. `profile_from_edl` measures the
 dissolve share over the `len(clips) - 1` boundaries (and still rejects single clips).
 
 Planned additions (not yet in `schemas.py`; each lands with the module that needs it):
@@ -489,7 +489,7 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   records and reruns detection instead of assuming zero dissolves. Style distance
   adds the absolute difference of dissolve shares, skipped when either is unmeasured.
   EDL profiles now measure the mix from `Clip.transition_in`, and the rules planner
-  assigns it (see the EDL transitions entry below); rendering remains unchanged.
+  assigns it (see the EDL transitions and preview dissolves entries below).
   `dissolve_cuts` are taken from the merged cut list.
 
 - 2026-10-18: EDL transitions — **schema change**: `Transition(kind, duration_s)` and
@@ -504,12 +504,25 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   at half the shorter neighbouring clip's final timeline duration, after fitting and
   in/out rounding. Selection, length sampling, fitting and placement are unchanged.
   Dissolves are centred on boundaries without changing in/out points, timeline
-  durations or the EDL total; media overlap is a future renderer concern.
+  durations or the EDL total; the preview now renders the media overlap (2026-10-19).
   `profile_from_edl` measures dissolves / `(len(clips) - 1)` and returns a measured
   `TransitionMix`, including zero dissolves for old EDLs; single clips still raise
-  the pacing error. Known gap: `render/preview.py` still renders hard cuts until it
-  supports `transition_in`; these transitions describe the planned EDL, not the
-  current preview.
+  the pacing error. The preview supports these centred dissolves as of 2026-10-19.
+
+- 2026-10-19: preview dissolves — a pure segment plan shortens clip bodies by half
+  each adjacent dissolve and inserts a transition over `[b - d/2, b + d/2]`.
+  Window edges snap on the cumulative frame grid; segment frame counts preserve
+  the original total. Source handles respect speed and may extend beyond shot
+  bounds; missing asset handles use cloned edge video frames and silent audio.
+  Video uses `xfade=fade`, audio a linear `acrossfade`; 30 ms fades remain only
+  at hard cuts and programme endpoints. Overlapping windows or windows outside
+  the timeline raise a render error; the rules planner's capped durations fit.
+  Bodies and transitions use the same H.264/PCM MOV format, canvas and fps, joined
+  by the concat demuxer with video copy. Hard-cut-only cache keys are unchanged
+  except for speed-adjusted silent sources: generated silence now uses signed
+  samples before `atempo`, avoiding its unsigned-silence DC offset. Dissolve keys
+  include both source spans, speeds, padding, duration, canvas and render params.
+  Subtitle cues still cover each full resolved clip span.
 
 ## Open questions
 

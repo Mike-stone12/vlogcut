@@ -1,7 +1,7 @@
 """EDL -> low-res preview mp4, rendered from proxies with FFmpeg.
 
-Each clip becomes a cached segment (H.264 + PCM in .mov, so durations stay
-sample-exact), then the segments are joined with the concat demuxer (video copied,
+Clip bodies and centred dissolves become cached H.264 + PCM .mov segments, keeping
+durations sample-exact. Segments are joined with the concat demuxer (video copied,
 audio encoded once) and optional music is mixed under the original sound. A soft
 subtitle track shows, per clip, where it came from and why it was picked.
 
@@ -50,13 +50,19 @@ class RenderError(RuntimeError):
 
 
 class Segment(BaseModel):
-    """One clip resolved against its shot and asset, ready to render."""
+    """Resolved source span; an incoming source makes this a transition segment."""
 
     clip: Clip
     asset: MediaAsset
     src_start_s: float  # absolute time in the asset
     src_dur_s: float
     out_dur_s: float  # on the timeline, snapped to the frame grid
+    incoming: Segment | None = None  # second source of a dissolve segment
+    dissolve_s: float = 0.0
+    pad_start_s: float = 0.0  # timeline seconds of cloned edge video / silent audio
+    pad_end_s: float = 0.0
+    fade_in: bool = True
+    fade_out: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -119,35 +125,135 @@ def resolve(edl: EDL, shots: Sequence[Shot], assets: Sequence[MediaAsset], fps: 
     return segments
 
 
-def segment_args(seg: Segment, canvas: tuple[int, int], params: PreviewParams, out) -> list[str]:
+def segment_plan(clips: Sequence[Segment], fps: int) -> list[Segment]:
+    """Split resolved clips at cumulative, frame-snapped dissolve window edges.
+
+    Source handles may extend beyond shots, but never require media outside assets.
+    Overlapping windows cannot be represented by a two-source dissolve.
+    """
+    plan, time, frame = [], 0.0, 0
+    for i, seg in enumerate(clips):
+        left = seg.clip.transition_in.duration_s / 2
+        right = clips[i + 1].clip.transition_in.duration_s / 2 if i + 1 < len(clips) else 0
+        end = time + seg.clip.timeline_duration_s
+        if left + right > seg.clip.timeline_duration_s:
+            raise RenderError("dissolve windows overlap or extend beyond the timeline")
+        body_start = round((time + left) * fps) if left else frame
+        clip_end = frame + round(seg.out_dur_s * fps)
+        body_end = round((end - right) * fps) if right else clip_end
+        if body_end > body_start:
+            plan.append(
+                seg
+                if not left and not right
+                else _span(
+                    seg,
+                    seg.src_start_s + left * seg.clip.speed,
+                    seg.clip.timeline_duration_s - left - right,
+                    (body_end - body_start) / fps,
+                ).model_copy(update={"fade_in": not left, "fade_out": not right})
+            )
+        if right:
+            duration = 2 * right
+            frames = round((end + right) * fps) - body_end
+            if frames > 0:
+                incoming = clips[i + 1]
+                outgoing = _span(
+                    seg,
+                    seg.src_start_s + seg.src_dur_s - right * seg.clip.speed,
+                    duration,
+                    frames / fps,
+                )
+                plan.append(
+                    outgoing.model_copy(
+                        update={
+                            "incoming": _span(
+                                incoming,
+                                incoming.src_start_s - right * incoming.clip.speed,
+                                duration,
+                                frames / fps,
+                            ),
+                            "dissolve_s": duration,
+                        }
+                    )
+                )
+        time, frame = end, clip_end
+    return plan
+
+
+def _span(seg: Segment, start: float, duration: float, out_duration: float) -> Segment:
+    speed = seg.clip.speed
+    stop = start + duration * speed
+    lo, hi = max(0.0, start), min(seg.asset.duration_s, stop)
+    return seg.model_copy(
+        update={
+            "src_start_s": lo,
+            "src_dur_s": hi - lo,
+            "out_dur_s": out_duration,
+            "pad_start_s": max(0.0, -start) / speed,
+            "pad_end_s": max(0.0, stop - seg.asset.duration_s) / speed,
+            "fade_in": False,
+            "fade_out": False,
+        }
+    )
+
+
+def _filters(
+    seg: Segment, canvas: tuple[int, int], params: PreviewParams, index: int, audio_index: int
+) -> str:
     w, h = canvas
     d = seg.out_dur_s
-    args = ["-v", "error", "-y", "-ss", f"{seg.src_start_s:.3f}", "-t", f"{seg.src_dur_s:.3f}"]
-    args += ["-i", str(seg.asset.proxy_path)]
-    if not seg.asset.has_audio:
-        args += ["-f", "lavfi", "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo"]
     fit = f"scale={w}:{h}:force_original_aspect_ratio=decrease"
     speed = f"setpts=(PTS-STARTPTS)/{seg.clip.speed:.6f},fps={params.fps}"
+    if not seg.fade_in or not seg.fade_out:
+        speed += (
+            f",tpad=start_mode=clone:start_duration={seg.pad_start_s:.6f}"
+            f":stop_mode=clone:stop_duration={seg.pad_end_s + 1 / params.fps:.6f}"
+        )
     if params.background == "blur":
         fill = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},boxblur=20:2"
-        video = f"[0:v]{speed},split[a][b];[a]{fill}[bg];[b]{fit}[fg];"
-        video += "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p[v]"
+        video = (
+            f"[{index}:v]{speed},split[x{index}][y{index}];[x{index}]{fill}[bg{index}];"
+            f"[y{index}]{fit}[fg{index}];[bg{index}][fg{index}]overlay=(W-w)/2:(H-h)/2"
+        )
     else:
-        video = f"[0:v]{speed},{fit},pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
-        video += ",format=yuv420p[v]"
-    src_a = "[0:a]" if seg.asset.has_audio else "[1:a]"
+        video = f"[{index}:v]{speed},{fit},pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black"
+    video += f",setsar=1,format=yuv420p[v{index}]"
     fade = min(params.audio_fade_s, d / 2)
     audio = ",".join(
-        ["asetpts=PTS-STARTPTS", *atempo_chain(seg.clip.speed)]
+        (["aformat=sample_fmts=s16"] if not seg.asset.has_audio else [])
+        + ["asetpts=PTS-STARTPTS", *atempo_chain(seg.clip.speed)]
         + [f"aresample={AUDIO_RATE}", "aformat=sample_fmts=s16:channel_layouts=stereo"]
+        + ([f"adelay={round(seg.pad_start_s * AUDIO_RATE)}S:all=1"] if seg.pad_start_s else [])
         + ["apad", f"atrim=0:{d:.6f}"]
-        + (
-            [f"afade=t=in:d={fade:.3f}", f"afade=t=out:st={d - fade:.6f}:d={fade:.3f}"]
-            if fade
-            else []
-        )
+        + ([f"afade=t=in:d={fade:.3f}"] if fade and seg.fade_in else [])
+        + ([f"afade=t=out:st={d - fade:.6f}:d={fade:.3f}"] if fade and seg.fade_out else [])
     )
-    args += ["-filter_complex", f"{video};{src_a}{audio}[a]", "-map", "[v]", "-map", "[a]"]
+    return f"{video};[{audio_index}:a]{audio}[a{index}]"
+
+
+def segment_args(seg: Segment, canvas: tuple[int, int], params: PreviewParams, out) -> list[str]:
+    args, filters, labels, index = ["-v", "error", "-y"], [], [], 0
+    d = seg.out_dur_s
+    for source in [seg, seg.incoming] if seg.incoming else [seg]:
+        args += ["-ss", f"{source.src_start_s:.3f}", "-t", f"{source.src_dur_s:.3f}"]
+        args += ["-i", str(source.asset.proxy_path)]
+        audio_index = index
+        if not source.asset.has_audio:
+            audio_index += 1
+            args += ["-f", "lavfi", "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo"]
+        filters.append(_filters(source, canvas, params, index, audio_index))
+        labels.append(index)
+        index = audio_index + 1
+    video, audio = "[v0]", "[a0]"
+    if seg.incoming:
+        other = labels[1]
+        filters += [
+            f"[v0][v{other}]xfade=transition=fade:duration={d:.6f}:offset=0[v]",
+            f"[a0][a{other}]acrossfade=d={d:.6f}:c1=tri:c2=tri[a]",
+        ]
+        video, audio = "[v]", "[a]"
+    args += ["-filter_complex", ";".join(filters), "-map", video, "-map", audio]
+    args += ["-pix_fmt", "yuv420p"]
     args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(params.crf)]
     args += ["-g", str(params.fps), "-r", str(params.fps), "-frames:v", str(round(d * params.fps))]
     args += ["-c:a", "pcm_s16le", "-f", "mov", str(out)]
@@ -160,6 +266,12 @@ def segment_key(seg: Segment, canvas: tuple[int, int], params: PreviewParams) ->
         f"{seg.src_dur_s:.3f}", f"{seg.out_dur_s:.6f}", f"{seg.clip.speed:.4f}", canvas,
         params.fps, params.background, params.audio_fade_s, params.crf,
     ]  # fmt: skip
+    if not seg.asset.has_audio and seg.clip.speed != 1.0:
+        parts += ["signed-silence-v1"]  # atempo on unsigned silence can add a DC offset
+    if not seg.fade_in or not seg.fade_out or seg.incoming:
+        parts += ["dissolve-v1", seg.fade_in, seg.fade_out, seg.pad_start_s, seg.pad_end_s]
+        if seg.incoming:
+            parts += [seg.dissolve_s, segment_key(seg.incoming, canvas, params)]
     return hashlib.sha1(repr(parts).encode()).hexdigest()[:16]
 
 
@@ -233,7 +345,7 @@ def render_preview(
     seg_dir.mkdir(parents=True, exist_ok=True)
 
     files = []
-    for seg in segments:
+    for seg in segment_plan(segments, params.fps):
         path = seg_dir / f"{segment_key(seg, canvas, params)}.mov"
         if not path.is_file():
             tmp = path.with_name(f"{path.stem}.part.mov")

@@ -15,9 +15,10 @@ from vlogcut.render.preview import (
     resolve,
     segment_args,
     segment_key,
+    segment_plan,
     srt,
 )
-from vlogcut.schemas import EDL, Clip, MediaAsset, MusicCue, QualityFlags, Shot
+from vlogcut.schemas import EDL, Clip, MediaAsset, MusicCue, QualityFlags, Shot, Transition
 
 Q = QualityFlags(sharpness=100, exposure_clip=0, shake=0)
 
@@ -128,8 +129,157 @@ def test_music_filter_mixes_under_programme_audio():
 
 
 # ---------------------------------------------------------------------------
-# real rendering
+# dissolve planning and rendering
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("duration", [0, 0.5, 0.53])
+def test_segment_plan_windows_and_padding(duration):
+    clips = [
+        Clip(shot_id="p_000", in_s=0, out_s=2),
+        Clip(
+            shot_id="q_000",
+            in_s=0,
+            out_s=3,
+            speed=1.5,
+            transition_in=Transition(kind="dissolve", duration_s=duration)
+            if duration
+            else Transition(),
+        ),
+    ]
+    assets = [_asset("p").model_copy(update={"duration_s": 2}), _asset("q")]
+    resolved = resolve(_edl(*clips), [_shot("p", 0, 2), _shot("q", 0, 3)], assets, 30)
+    plan = segment_plan(resolved, 30)
+    assert sum(round(s.out_dur_s * 30) for s in plan) == 120
+    if not duration:
+        assert plan == resolved
+        return
+    before, blend, after = plan
+    assert before.out_dur_s == round((2 - duration / 2) * 30) / 30
+    assert before.out_dur_s + blend.out_dur_s == round((2 + duration / 2) * 30) / 30
+    assert blend.out_dur_s == pytest.approx(duration, abs=1 / 30)
+    assert before.src_dur_s == pytest.approx(2 - duration / 2)
+    assert after.src_start_s == pytest.approx(duration / 2 * 1.5)
+    assert blend.pad_end_s == pytest.approx(duration / 2)
+    assert blend.incoming.pad_start_s == pytest.approx(duration / 2)
+    assert not before.fade_out and not after.fade_in
+    params = PreviewParams()
+    key = segment_key(blend, (160, 90), params)
+    changed = blend.model_copy(update={"incoming": after})
+    assert key != segment_key(changed, (160, 90), params)
+    args = segment_args(blend, (160, 90), params, "blend.mov")
+    graph = args[args.index("-filter_complex") + 1]
+    assert "tpad=start_mode=clone" in graph and "acrossfade=" in graph
+    assert "atempo=1.500000" in graph and "afade=" not in graph
+
+
+def test_segment_plan_adjacent_windows_and_available_handles():
+    clips = [
+        Clip(
+            shot_id="p_000",
+            in_s=0,
+            out_s=d,
+            transition_in=Transition(kind="dissolve", duration_s=0.53) if i else Transition(),
+        )
+        for i, d in enumerate((1.13, 1.17, 1.19))
+    ]
+    resolved = resolve(_edl(*clips), [_shot("p")], [_asset("p")], 30)
+    plan = segment_plan(resolved, 30)
+    assert len(plan) == 5
+    assert sum(round(s.out_dur_s * 30) for s in plan) == round(3.49 * 30)
+    assert not plan[2].fade_in and not plan[2].fade_out
+    for transition in (plan[1], plan[3]):
+        assert transition.pad_end_s == transition.incoming.pad_start_s == 0
+    clips[1].transition_in.duration_s = 5
+    with pytest.raises(RenderError, match="overlap"):
+        segment_plan(resolve(_edl(*clips), [_shot("p")], [_asset("p")], 30), 30)
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.parametrize(
+    ("speed", "audio", "background"), [(1.0, True, "black"), (2.0, False, "blur")]
+)
+def test_render_centred_dissolve(tmp_path, speed, audio, background):
+    assets, shots = [], []
+    for color in ("red", "blue"):
+        path = tmp_path / f"{color}.mp4"
+        ffmpeg.run(
+            "ffmpeg",
+            [
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                f"color={color}:s=160x90:r=30:d=2",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                str(path),
+            ],
+        )
+        assets.append(
+            probe_asset(path).model_copy(update={"proxy_path": str(path), "has_audio": audio})
+        )
+        shots.append(
+            Shot(shot_id=color, asset_id=assets[-1].asset_id, start_s=0, end_s=2, quality=Q)
+        )
+    edl = _edl(
+        Clip(shot_id="red", in_s=0, out_s=2, speed=speed),
+        Clip(
+            shot_id="blue",
+            in_s=0,
+            out_s=2,
+            speed=speed,
+            transition_in=Transition(kind="dissolve", duration_s=0.5),
+        ),
+    )
+    params = PreviewParams(short_side=90, background=background)
+    out = render_preview(edl, shots, assets, tmp_path, tmp_path / "out.mp4", params=params)
+    assert float(_probe(out)["video"]["duration"]) == pytest.approx(
+        edl.total_duration_s, abs=0.5 / 30
+    )
+    colors = []
+    for t in (2 / speed - 0.5, 2 / speed, 2 / speed + 0.5):
+        pixel = ffmpeg.run_bytes(
+            "ffmpeg",
+            [
+                "-v",
+                "error",
+                "-ss",
+                str(t),
+                "-i",
+                str(out),
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=1:1,format=rgb24",
+                "-f",
+                "rawvideo",
+                "-",
+            ],
+        )
+        colors.append(tuple(pixel))
+    assert colors[0][0] > 230 and colors[0][2] < 20
+    assert all(70 < colors[1][channel] < 185 for channel in (0, 2))
+    assert colors[2][0] < 20 and colors[2][2] > 230
+    if audio:
+        assert _rms_db(out, 2 / speed - 0.04, 0.08) > -35
+    else:
+        assert _rms_db(out, 2 / speed - 0.04, 0.08) < -60
+    cached = list((tmp_path / "preview" / "segments").glob("*.mov"))
+    assert len(cached) == 3
+    mtimes = [p.stat().st_mtime_ns for p in cached]
+    render_preview(edl, shots, assets, tmp_path, tmp_path / "again.mp4", params=params)
+    assert [p.stat().st_mtime_ns for p in cached] == mtimes
 
 
 def _probe(path) -> dict:
