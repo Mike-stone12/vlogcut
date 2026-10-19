@@ -352,6 +352,67 @@ def test_repair_retains_speech_ratio_once_in_conversation(
     assert "Speech ratio" not in client.requests[1]["messages"][-1]["content"]
 
 
+@pytest.mark.parametrize("bpm, tempo, period", [(120, "120.0", "0.50"), (97.5, "97.5", "0.62")])
+@pytest.mark.parametrize("other_guidance", [False, True])
+def test_messages_describe_measured_music_bpm(
+    shots: list[Shot], bpm: float, tempo: str, period: str, other_guidance: bool
+) -> None:
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1, median=5, p90=8),
+        cuts_per_min=12,
+        music_bpm=bpm,
+        structure=(
+            StructureStats(montage_share=0.3, intro_pace_ratio=0.5, kind_alternation=0.62)
+            if other_guidance
+            else None
+        ),
+        speech_ratio=0.35 if other_guidance else None,
+    )
+    before = profile.model_dump()
+    messages = build_planner_messages(shots, target_s=60, profile=profile)
+    assert messages == build_planner_messages(shots, target_s=60, profile=profile)
+    line = (
+        f"Reference music tempo: {tempo} BPM (beat period {period} s). "
+        "The reference creator's cuts follow this tempo; prefer clip lengths near "
+        "whole multiples of the beat period when they fit."
+    )
+    user = messages[1]["content"]
+    assert user.splitlines().count(line) == 1
+    assert line + "\nBrief: none." in user
+    if other_guidance:
+        assert "with the rest from b-roll.\n" + line in user
+    baseline = build_planner_messages(
+        shots, target_s=60, profile=profile.model_copy(update={"music_bpm": None})
+    )
+    assert messages[0] == baseline[0]
+    assert user.replace(line + "\n", "") == baseline[1]["content"]
+    assert profile.model_dump() == before
+
+
+@pytest.mark.parametrize("parse_error", [False, True])
+def test_repair_retains_music_bpm_once_in_conversation(
+    tmp_path: Path, shots: list[Shot], valid_json: str, parse_error: bool
+) -> None:
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1, median=5, p90=8),
+        cuts_per_min=12,
+        music_bpm=120,
+    )
+    raw = "not JSON" if parse_error else valid_json.replace('"s2"', '"missing"')
+    router, client = make_router(tmp_path, [raw, valid_json])
+    result = plan_with_repair(router, shots, target_s=10, profile=profile)
+    assert result.rounds == 1
+    assert result.violations == []
+    assert len(client.requests) == 2
+    initial = client.requests[0]["messages"]
+    for request in client.requests:
+        messages = request["messages"]
+        assert messages[:2] == initial
+        conversation = "\n".join(message["content"] for message in messages)
+        assert conversation.count("Reference music tempo: 120.0 BPM (beat period 0.50 s)") == 1
+    assert "Reference music tempo" not in client.requests[1]["messages"][-1]["content"]
+
+
 @pytest.mark.parametrize("structure", [None, StructureStats(montage_share=0.3)])
 def test_messages_allow_cold_open(shots: list[Shot], structure: StructureStats | None) -> None:
     profile = StyleProfile(
@@ -398,6 +459,14 @@ def test_unmeasured_profile_preserves_original_prompt_bytes(
             else f" Dissolve share={dissolve_share}."
         )
     messages = build_planner_messages(shots, target_s=10, profile=profile, constraints=constraints)
+    if profile is not None:
+        explicit_none = build_planner_messages(
+            shots,
+            target_s=10,
+            profile=profile.model_copy(update={"music_bpm": None}),
+            constraints=constraints,
+        )
+        assert json.dumps(explicit_none).encode("utf-8") == json.dumps(messages).encode("utf-8")
     # Captured from the original system prompt before adding structure guidance.
     assert hashlib.sha256(messages[0]["content"].encode("utf-8")).hexdigest() == (
         "a9923fc0954efa03f365e943650429602202bfa058be3b3b66612d9362f7394b"
@@ -407,7 +476,7 @@ def test_unmeasured_profile_preserves_original_prompt_bytes(
         f"Shot table (chronological order):\n{format_shot_table(shots)}"
     )
     assert messages[1]["content"].encode("utf-8") == expected_user.encode("utf-8")
-    for wording in ("montage", "Intro pace", "first 20 s", "Cold open"):
+    for wording in ("montage", "Intro pace", "first 20 s", "Cold open", "Reference music tempo"):
         assert wording not in str(messages)
 
 

@@ -137,6 +137,13 @@ gain_db (number, default 0). No music tracks are supplied here, so leave music e
                 f"\nSpeech ratio={profile.speech_ratio:.2f}: aim for roughly this share "
                 "of the timeline duration from talking clips, with the rest from b-roll."
             )
+        if profile.music_bpm is not None:
+            pacing += (
+                f"\nReference music tempo: {profile.music_bpm:.1f} BPM "
+                f"(beat period {60 / profile.music_bpm:.2f} s). The reference creator's "
+                "cuts follow this tempo; prefer clip lengths near whole multiples "
+                "of the beat period when they fit."
+            )
     constraint_lines = [" ".join(text.split()) for text in constraints or () if text.strip()]
     user = "\n".join(
         [
