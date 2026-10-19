@@ -180,6 +180,12 @@ Defined in `src/vlogcut/schemas.py`:
 
 Changing a schema means updating this file and the tests in the same change.
 
+`Shot.cut_points` holds code-proposed `CutPoint(time_s, kind)` candidates at absolute
+source-asset times, on the same timeline as `Shot.start_s` and `end_s`. Times must be
+sorted, unique, and strictly inside the shot; they need not be inside `usable_range`
+(the planner decides that). The field defaults to an empty list, so old shot JSON
+still loads. `kind` is only `pause` for now; other kinds will add literals later.
+
 `StyleProfile.beat_aligned_ratio` and `speech_ratio` are `None` until the beat / speech
 analysis exists: `None` means "not measured", which is not the same as 0.
 `StyleProfile.transitions: TransitionMix | None = None` follows the same convention:
@@ -205,7 +211,7 @@ Planned additions (not yet in `schemas.py`; each lands with the module that need
 | Field / model | Why |
 |---|---|
 | `MusicCue.end_s`, ducking params | music mixing needs an end and a level under speech |
-| `Shot.kind` (talking / broll), `Shot.cut_points` | structure dimension; code-proposed in/out candidates |
+| `Shot.kind` (talking / broll) | structure dimension |
 | `StyleProfile.structure`, `.cold_open_clips` | the "grammar" dimensions |
 | `Run` manifest (inputs fingerprint → outputs) | EDL file names collide once profile version, brief, variant and model all vary |
 | `Feedback`, `PreferencePair` | the flywheel must be logged from the first real use |
@@ -553,6 +559,15 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   its 100 ms, 8 kHz audio-activity measurement for shake rejection is unchanged.
   Known gaps: music or background noise can hide pauses, and energy does not yet
   distinguish speech from non-speech.
+
+- 2026-10-22: shot cut points — **schema change**: `Shot.cut_points` defaults to an
+  empty list for old JSON and holds `CutPoint(time_s, kind)` with only `pause` as a
+  kind today. Times are absolute source-asset times, sorted without duplicates and
+  strictly inside the shot's start/end; `usable_range` does not constrain them.
+  `analyze/pauses.py` maps pause midpoints to sorted, deduplicated candidates with
+  `start_s + margin_s < time_s < end_s - margin_s`; the default margin is 0.1 s,
+  zero is allowed, and negative margins raise `ValueError`. Pipeline wiring,
+  caching and planner use are not done yet.
 
 ## Open questions
 

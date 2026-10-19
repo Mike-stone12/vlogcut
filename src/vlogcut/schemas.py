@@ -60,6 +60,13 @@ class QualityFlags(BaseModel):
         return self
 
 
+class CutPoint(BaseModel):
+    """Code-proposed cut at an absolute time on the source asset's timeline."""
+
+    time_s: float
+    kind: Literal["pause"]
+
+
 class Shot(BaseModel):
     """A continuous segment of one asset, the unit the planner selects from."""
 
@@ -74,6 +81,7 @@ class Shot(BaseModel):
     interest: int | None = Field(default=None, ge=1, le=5)
     transcript: str | None = None
     dup_group: str | None = None  # shots in the same group are near-duplicates
+    cut_points: list[CutPoint] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_bounds(self) -> Shot:
@@ -82,6 +90,17 @@ class Shot(BaseModel):
         rng = self.quality.usable_range
         if rng is not None and rng[1] > self.end_s - self.start_s + 1e-6:
             raise ValueError(f"shot {self.shot_id}: usable_range ends after the shot")
+        previous = self.start_s
+        for point in self.cut_points:
+            if not self.start_s < point.time_s < self.end_s:
+                raise ValueError(
+                    f"shot {self.shot_id}: cut_points must be strictly inside the shot"
+                )
+            if point.time_s <= previous:
+                raise ValueError(
+                    f"shot {self.shot_id}: cut_points must be sorted with no duplicates"
+                )
+            previous = point.time_s
         return self
 
     @property

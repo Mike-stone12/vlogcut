@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict, Field
 
 from vlogcut.ingest import ffmpeg
+from vlogcut.schemas import CutPoint
 
 if TYPE_CHECKING:
     import numpy as np
@@ -103,11 +104,28 @@ def cut_points_in(
     pauses: Sequence[Pause], start_s: float, end_s: float, margin_s: float = 0.1
 ) -> list[float]:
     """Sorted asset-time midpoints strictly inside the bounds plus a 100 ms margin."""
+    return _midpoints_in([p.mid_s for p in pauses], start_s, end_s, margin_s)
+
+
+def cut_points_for_span(
+    midpoints: Sequence[float], start_s: float, end_s: float, margin_s: float = 0.1
+) -> list[CutPoint]:
+    """Unique pause candidates in asset time, strictly inside the span plus margin."""
+    return [
+        CutPoint(time_s=t, kind="pause")
+        for t in sorted(set(_midpoints_in(midpoints, start_s, end_s, margin_s)))
+    ]
+
+
+def _midpoints_in(
+    midpoints: Sequence[float], start_s: float, end_s: float, margin_s: float
+) -> list[float]:
+    """Share strict margin filtering between pause records and midpoint candidates."""
     if not all(math.isfinite(v) for v in (start_s, end_s, margin_s)):
         raise ValueError("bounds and margin must be finite")
     if end_s < start_s or margin_s < 0:
         raise ValueError("bounds must be ordered and margin nonnegative")
-    return sorted(p.mid_s for p in pauses if start_s + margin_s < p.mid_s < end_s - margin_s)
+    return sorted(t for t in midpoints if start_s + margin_s < t < end_s - margin_s)
 
 
 def _load_mono_pcm(path: str | Path, sample_rate: int, seek: Sequence[str] = ()) -> np.ndarray:

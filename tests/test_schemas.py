@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from vlogcut.schemas import (
     EDL,
     Clip,
+    CutPoint,
     DurationStats,
     QualityFlags,
     Shot,
@@ -31,6 +32,52 @@ def test_quality_usable_range_must_fit_the_shot():
     with pytest.raises(ValidationError):
         QualityFlags(sharpness=50, exposure_clip=0, shake=0, usable_range=(2.0, 1.0))
     assert QualityFlags(sharpness=1, exposure_clip=0, shake=0).warnings == []
+
+
+def test_old_shot_json_defaults_to_independent_empty_cut_points() -> None:
+    payload = (
+        '{"shot_id":"s", "asset_id":"a", "start_s":10, "end_s":14,'
+        '"quality":{"sharpness":50, "exposure_clip":0, "shake":0}}'
+    )
+    first, second = Shot.model_validate_json(payload), Shot.model_validate_json(payload)
+    assert first.cut_points == second.cut_points == []
+    assert first.cut_points is not second.cut_points
+
+
+def test_shot_cut_points_round_trip_independently_of_usable_range() -> None:
+    points = [CutPoint(time_s=t, kind="pause") for t in [10.5, 12, 13.5]]
+    shot = Shot(
+        shot_id="s",
+        asset_id="a",
+        start_s=10,
+        end_s=14,
+        quality=QualityFlags(sharpness=50, exposure_clip=0, shake=0, usable_range=(1, 3)),
+        cut_points=points,
+    )
+    assert shot.cut_points == points
+    assert Shot.model_validate_json(shot.model_dump_json()) == shot
+
+
+@pytest.mark.parametrize(
+    "times",
+    [[12, 11], [11, 11], [10], [14], [9.9], [14.1]],
+    ids=["unsorted", "duplicate", "start", "end", "before", "after"],
+)
+def test_shot_rejects_invalid_cut_points(times: list[float]) -> None:
+    with pytest.raises(ValidationError, match="cut_points"):
+        Shot(
+            shot_id="s",
+            asset_id="a",
+            start_s=10,
+            end_s=14,
+            quality=QualityFlags(sharpness=50, exposure_clip=0, shake=0),
+            cut_points=[CutPoint(time_s=t, kind="pause") for t in times],
+        )
+
+
+def test_cut_point_rejects_other_kinds() -> None:
+    with pytest.raises(ValidationError, match="kind"):
+        CutPoint.model_validate({"time_s": 12, "kind": "motion"})
 
 
 def test_clip_speed_changes_timeline_duration():
