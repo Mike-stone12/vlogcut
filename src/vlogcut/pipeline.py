@@ -228,6 +228,7 @@ def cut(
     target_s: float = 180.0,
     strategy: str = "coverage",
     style: Path | None = None,
+    cold_open: bool = False,
     planner: Literal["rules", "llm"] = "rules",
     router: ModelRouter | None = None,
     caption: bool = False,
@@ -255,6 +256,11 @@ def cut(
     workspace = Path(workspace)
     # read the profile first: a bad file should fail before minutes of analysis
     profile = load_profile(style) if style is not None else None
+    if cold_open:
+        if profile is None or profile.cold_open_clips == 0:
+            log.warning("Cold-open allowance is 0; no cold open is produced")
+        if planner == "llm":
+            log.warning("LLM planner ignores cold_open; the flag still applies to a rules fallback")
     files = find_footage(folder)
     if not files:
         raise FileNotFoundError(f"no video files in {folder}")
@@ -282,8 +288,9 @@ def cut(
             edl, repair_rounds = planned.edl, planned.rounds
     if used_planner == "rules":
         edl = rough_cut(
-            shots, assets, RoughCutParams(target_s=target_s, strategy=strategy), profile
-        )
+            shots, assets, RoughCutParams(target_s=target_s, strategy=strategy), profile,
+            cold_open=cold_open,
+        )  # fmt: skip
     if style is not None and profile is not None:
         edl.notes += f"; style {style.name}: {profile.notes}"  # an EDL says what paced it
     if music is not None:

@@ -107,8 +107,8 @@ flags are skipped: references are finished edits), then aggregate:
   reads as a speed slider; structure is what makes a cut recognisably someone's.
   Cold-open allowance is user-set. The rules planner uses the intro pacing ratio
   to shape clip lengths before fitting the total and can produce one opt-in cold
-  open with `rough_cut(cold_open=True)` when the allowance is positive (not yet
-  wired into the pipeline or CLI). Planners do not yet produce montage bursts.
+  open with `pipeline.cut(cold_open=True)` or `vlogcut cut --cold-open` when a
+  `--style` profile has `cold_open_clips > 0`. Planners do not yet produce montage bursts.
 - Transitions: share of hard cuts / dissolves (from `analyze/transitions.py`); fades
   through black currently count as two dissolves
 - Audio: speech-over-music ratio, whether clip audio is kept under music
@@ -284,8 +284,8 @@ in the day can precede the day from the beginning. Chronology starts afresh amon
 the remaining clips; all other checks still apply to the opening clips. Reference
 analysis does not measure this allowance and keeps the default. It is not a style
 distance dimension. The rules planner can move one later hook to the front when
-explicitly called with `cold_open=True` and this allowance is positive; it is off
-by default and not yet wired into the pipeline or CLI. Clip timing is preserved,
+requested via `pipeline.cut(cold_open=True)` or `vlogcut cut --cold-open` and this
+allowance is positive; it is off by default. Clip timing is preserved,
 the remaining clips stay chronological, and newly joined duplicate groups are avoided.
 
 `Clip.transition_in: Transition` defaults to a hard cut, so old EDL JSON still loads.
@@ -386,6 +386,7 @@ unrelated footage in a way viewers recognise. Protocol:
 - [x] Week 5 · feedback: feedback-role classification into edit constraints / profile deltas (feedback/classify.py)
 - [x] Week 3 · structure: rules planner honours intro_pace_ratio (plan/rules.py)
 - [x] Week 3 · structure: opt-in cold open in the rules planner (plan/rules.py)
+- [x] Week 3 · structure: opt-in cold open wired into pipeline.cut and CLI (pipeline.py, cli.py)
 - [x] Week 5 · feedback: CLI page + pairs subcommands (cli.py)
 - [x] Week 5 · feedback: static variants page + feedback JSON loader (feedback/page.py)
 - [x] Week 5 · feedback: Feedback / PreferencePair contracts and pair derivation (schemas.py, feedback/pairs.py)
@@ -1116,6 +1117,13 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   floating-point precision and the remaining timeline stays chronological under
   the existing cold-open allowance. No schema, validator, pipeline, CLI, LLM planner
   or style changes; montage generation remains planned.
+
+- 2026-10-19: pipeline and CLI cold-open opt-in — `pipeline.cut(cold_open=False)`
+  and `vlogcut cut --cold-open` forward the flag to rules planning, including the
+  fallback after LLM planning failure. A missing profile or zero allowance logs a
+  warning and plans normally. With opt-in, the LLM planner logs one warning that
+  it ignores the flag; its prompt is unchanged, and rules fallback honors the flag.
+  Default output bytes and filenames, validation and repair are unchanged.
 
 ## Open questions
 

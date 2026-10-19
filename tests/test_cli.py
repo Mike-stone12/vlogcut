@@ -55,6 +55,21 @@ def test_jobs_forwarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, jobs: i
     assert cli.main(argv) == 0
 
 
+@pytest.mark.parametrize("cold_open", [False, True])
+def test_cold_open_forwarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cold_open: bool
+) -> None:
+    def cut(*args: object, **kwargs: object) -> CutResult:
+        assert kwargs["cold_open"] is cold_open
+        return _cut_result(tmp_path, [])
+
+    monkeypatch.setattr("vlogcut.pipeline.cut", cut)
+    argv = ["cut", str(tmp_path), "--no-render"]
+    if cold_open:
+        argv.append("--cold-open")
+    assert cli.main(argv) == 0
+
+
 def test_cli_errors_are_one_line_and_exit_1(tmp_path, capsys):
     assert cli.main(["cut", str(tmp_path / "missing")]) == 1
     assert "is not a folder" in capsys.readouterr().err
