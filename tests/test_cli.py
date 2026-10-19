@@ -435,6 +435,25 @@ def test_style_show_and_diff_measured_kind_alternation(
     ] in rows
 
 
+@pytest.mark.parametrize(("a_value", "b_value"), [(0.2, 0.7), (0.0, 0.0)])
+def test_style_show_and_diff_measured_speech_ratio(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], a_value: float, b_value: float
+) -> None:
+    paths = [_write_profile(tmp_path / name, 1, 2, 4, 20) for name in ("a.json", "b.json")]
+    for path, value in zip(paths, [a_value, b_value], strict=True):
+        profile = json.loads(path.read_text(encoding="utf-8"))
+        profile["speech_ratio"] = value
+        path.write_text(json.dumps(profile), encoding="utf-8")
+        assert cli.main(["style", "show", str(path)]) == 0
+        rows = [line.split() for line in capsys.readouterr().out.splitlines()]
+        assert ["speech", "ratio", f"{value:.2f}"] in rows
+    assert cli.main(["style", "diff", *map(str, paths)]) == 0
+    rows = [line.split() for line in capsys.readouterr().out.splitlines()]
+    assert [
+        "speech", "ratio", f"{a_value:.2f}", f"{b_value:.2f}", f"{abs(a_value - b_value):.2f}",
+    ] in rows  # fmt: skip
+
+
 def test_style_diff_measured_look(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     paths = [_write_profile(tmp_path / name, 1, 2, 4, 20) for name in ("a.json", "b.json")]
     for path, warmth in zip(paths, [-0.2, 0.2], strict=True):

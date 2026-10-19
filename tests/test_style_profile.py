@@ -87,6 +87,8 @@ def test_build_look_cache_hit_without_resampling(
     monkeypatch.setattr(look_mod, "look_stats", measure)
     params = ReferenceParams(dissolves=False, beats=False)
     first = build_profile(["a.mp4"], tmp_path, params)
+    assert first.speech_ratio is None
+    assert '"speech_ratio":null' in first.model_dump_json()
     assert (first.look is None) == empty
     if not empty:
         assert first.look.brightness == 0.5

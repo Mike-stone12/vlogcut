@@ -15,12 +15,13 @@ otherwise. Pure functions, no numpy.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from vlogcut.analyze.kind import classify_kind
-from vlogcut.schemas import EDL, Shot, StyleProfile, TransitionMix
+from vlogcut.schemas import EDL, Clip, Shot, StyleProfile, TransitionMix
 from vlogcut.style.profile import kind_alternation, profile_from_durations
 
 LOG_DIMS = ("p10", "median", "p90", "cuts_per_min", "intro_pace")  # |log2 ratio|
@@ -97,15 +98,31 @@ def profile_distance(a: StyleProfile, b: StyleProfile) -> StyleDistance:
     return StyleDistance(total=total, per_dim=per_dim, unmeasured=unmeasured)
 
 
+def speech_ratio(
+    clips: Sequence[Clip], kinds: Mapping[str, Literal["talking", "broll"] | None]
+) -> float | None:
+    """Talking timeline duration / known-kind duration; unknown IDs are excluded."""
+    talking_s, known_s = 0.0, 0.0
+    for clip in clips:
+        kind = kinds.get(clip.shot_id)
+        if kind is not None:
+            duration_s = clip.timeline_duration_s
+            known_s += duration_s
+            if kind == "talking":
+                talking_s += duration_s
+    return min(1.0, max(0.0, talking_s / known_s)) if known_s else None
+
+
 def profile_from_edl(
     edl: EDL, source: str = "edl", *, shots: Sequence[Shot] | None = None
 ) -> StyleProfile:
-    """Measure pacing, structure and transitions; supplied shots enable kind alternation."""
+    """Measure pacing, structure and transitions; shots enable alternation and speech ratio."""
     profile = profile_from_durations([[c.timeline_duration_s for c in edl.clips]], [source])
     dissolve = sum(c.transition_in.kind == "dissolve" for c in edl.clips) / (len(edl.clips) - 1)
     profile.transitions = TransitionMix(hard_cut=1 - dissolve, dissolve=dissolve)
     if shots:
         kinds = {shot.shot_id: classify_kind(shot) for shot in shots}
+        profile.speech_ratio = speech_ratio(edl.clips, kinds)
         # Successful pacing measurement always includes the required montage share.
         assert profile.structure is not None
         profile.structure.kind_alternation = kind_alternation(
