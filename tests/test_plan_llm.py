@@ -1,6 +1,7 @@
 """Offline planner tests using the real router with a scripted provider client."""
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -9,11 +10,14 @@ import pytest
 
 from vlogcut.llm.router import ModelRouter
 from vlogcut.plan import (
+    LLMPlanResult,
     PlannerError,
     build_planner_messages,
     format_shot_table,
+    format_violations,
     parse_planner_response,
     plan_with_llm,
+    plan_with_repair,
 )
 from vlogcut.schemas import (
     EDL,
@@ -24,22 +28,22 @@ from vlogcut.schemas import (
     StyleProfile,
     TransitionMix,
 )
-from vlogcut.validate.checks import validate_edl
+from vlogcut.validate.checks import Violation, validate_edl
 
 
 class FakeClient:
-    def __init__(self, output: str) -> None:
-        self.output = output
+    def __init__(self, output: str | list[str]) -> None:
+        self.outputs = [output] if isinstance(output, str) else list(output)
         self.requests: list[dict[str, Any]] = []
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     def _create(self, **kwargs: Any) -> SimpleNamespace:
-        self.requests.append(kwargs)
-        message = SimpleNamespace(content=self.output)
+        self.requests.append(deepcopy(kwargs))
+        message = SimpleNamespace(content=self.outputs.pop(0))
         return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None)
 
 
-def make_router(tmp_path: Path, output: str) -> tuple[ModelRouter, FakeClient]:
+def make_router(tmp_path: Path, output: str | list[str]) -> tuple[ModelRouter, FakeClient]:
     client = FakeClient(output)
     config = {
         "providers": {"fake": {"base_url": "http://fake/v1"}},
@@ -187,3 +191,132 @@ def test_plan_garbage_raises_without_retry(tmp_path: Path, shots: list[Shot]) ->
     with pytest.raises(PlannerError):
         plan_with_llm(router, shots, target_s=10)
     assert len(client.requests) == 1
+
+
+def test_format_violations_is_deterministic() -> None:
+    violations = [
+        Violation(code="unknown_shot", clip_index=0, message="Unknown shot 'missing'"),
+        Violation(code="total_duration", clip_index=None, message="Total too short\nfor target"),
+        Violation(code="out_of_bounds", clip_index=2, message="Offsets exceed bounds"),
+    ]
+    before = [v.model_dump() for v in violations]
+    expected = (
+        "clip 0 | unknown_shot | Unknown shot 'missing'\n"
+        "clip - | total_duration | Total too short for target\n"
+        "clip 2 | out_of_bounds | Offsets exceed bounds"
+    )
+    assert format_violations(violations) == format_violations(violations) == expected
+    assert [v.model_dump() for v in violations] == before
+    assert format_violations([]) == "No violations."
+
+
+def test_repair_clean_first_reply(tmp_path: Path, shots: list[Shot], valid_json: str) -> None:
+    router, client = make_router(tmp_path, valid_json)
+    result = plan_with_repair(router, shots, target_s=10, brief="A quiet day.")
+    assert isinstance(result, LLMPlanResult)
+    assert result.edl == EDL.model_validate_json(valid_json)
+    assert result.rounds == 0
+    assert result.violations == []
+    assert len(client.requests) == 1
+    assert client.requests[0]["messages"] == build_planner_messages(
+        shots, target_s=10, brief="A quiet day."
+    )
+
+
+def test_repair_unknown_shot(tmp_path: Path, shots: list[Shot], valid_json: str) -> None:
+    raw = valid_json.replace('"s2"', '"unknown-shot"')
+    router, client = make_router(tmp_path, [raw, valid_json])
+    result = plan_with_repair(router, shots, target_s=10)
+    assert result.edl == EDL.model_validate_json(valid_json)
+    assert result.rounds == 1
+    assert result.violations == []
+    assert len(client.requests) == 2
+    messages = client.requests[1]["messages"]
+    assert messages[:-2] == client.requests[0]["messages"]
+    assert messages[-2] == {"role": "assistant", "content": raw}
+    assert messages[-1]["role"] == "user"
+    assert "unknown_shot" in messages[-1]["content"]
+    assert (
+        format_violations(validate_edl(EDL.model_validate_json(raw), shots, target_s=10))
+        in messages[-1]["content"]
+    )
+
+
+@pytest.mark.parametrize("raw", ["not JSON\nat all", '{"clips": []}'])
+def test_repair_parse_error(tmp_path: Path, shots: list[Shot], valid_json: str, raw: str) -> None:
+    router, client = make_router(tmp_path, [raw, valid_json])
+    result = plan_with_repair(router, shots, target_s=10)
+    assert result.rounds == 1
+    assert result.violations == []
+    assert len(client.requests) == 2
+    messages = client.requests[1]["messages"]
+    assert messages[-2] == {"role": "assistant", "content": raw}
+    with pytest.raises(PlannerError) as exc:
+        parse_planner_response(raw)
+    assert messages[-1]["role"] == "user"
+    assert str(exc.value) in messages[-1]["content"]
+
+
+@pytest.mark.parametrize("max_rounds", [0, 1, 2])
+def test_repair_exhausted_returns_last_parsed(
+    tmp_path: Path, shots: list[Shot], valid_json: str, max_rounds: int
+) -> None:
+    replies = [valid_json.replace('"s2"', f'"missing-{i}"') for i in range(max_rounds + 1)]
+    router, client = make_router(tmp_path, replies)
+    result = plan_with_repair(router, shots, target_s=10, max_rounds=max_rounds)
+    assert result.rounds == max_rounds
+    assert result.edl == EDL.model_validate_json(replies[-1])
+    assert result.violations == validate_edl(result.edl, shots, target_s=10)
+    assert [v.code for v in result.violations] == ["unknown_shot"]
+    assert len(client.requests) == max_rounds + 1
+    for i, request in enumerate(client.requests):
+        assert request["model"] == "m-plan"
+        assert len(request["messages"]) == 2 + 2 * i
+        if i:
+            assert request["messages"][:-2] == client.requests[i - 1]["messages"]
+            assert request["messages"][-2] == {"role": "assistant", "content": replies[i - 1]}
+
+
+@pytest.mark.parametrize("max_rounds", [0, 2])
+def test_repair_all_unparseable_raises(tmp_path: Path, shots: list[Shot], max_rounds: int) -> None:
+    router, client = make_router(tmp_path, ["garbage"] * (max_rounds + 1))
+    with pytest.raises(PlannerError, match="Invalid planner EDL"):
+        plan_with_repair(router, shots, target_s=10, max_rounds=max_rounds)
+    assert len(client.requests) == max_rounds + 1
+
+
+def test_repair_retains_parsed_edl_after_later_parse_failure(
+    tmp_path: Path, shots: list[Shot], valid_json: str
+) -> None:
+    raw = valid_json.replace('"s2"', '"unknown-shot"')
+    router, client = make_router(tmp_path, ["garbage", raw, "garbage again"])
+    result = plan_with_repair(router, shots, target_s=10)
+    assert result.rounds == 2
+    assert result.edl == EDL.model_validate_json(raw)
+    assert [v.code for v in result.violations] == ["unknown_shot"]
+    assert len(client.requests) == 3
+
+
+def test_repair_checks_supplied_target_and_profile(
+    tmp_path: Path, shots: list[Shot], valid_json: str
+) -> None:
+    profile = StyleProfile(shot_duration_s=DurationStats(p10=1, median=2, p90=3), cuts_per_min=30)
+    router, client = make_router(tmp_path, [valid_json, valid_json])
+    result = plan_with_repair(router, shots, target_s=20, profile=profile, max_rounds=1)
+    assert result.rounds == 1
+    assert [v.code for v in result.violations] == [
+        "clip_too_long",
+        "clip_too_long",
+        "total_duration",
+    ]
+    assert result.violations == validate_edl(result.edl, shots, profile=profile, target_s=20)
+    assert client.requests[0]["messages"] == build_planner_messages(
+        shots, target_s=20, profile=profile
+    )
+
+
+def test_repair_negative_rounds_raises_before_call(tmp_path: Path, shots: list[Shot]) -> None:
+    router, client = make_router(tmp_path, [])
+    with pytest.raises(ValueError, match="max_rounds"):
+        plan_with_repair(router, shots, target_s=10, max_rounds=-1)
+    assert client.requests == []

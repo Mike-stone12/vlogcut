@@ -1,21 +1,41 @@
-"""Single-call LLM planner core; semantic validation and repair belong to callers."""
+"""LLM planner core with optional bounded repair through hard-check feedback."""
 
 import logging
 import re
 from collections.abc import Sequence
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from vlogcut.llm.router import ModelRouter
 from vlogcut.plan.shot_table import format_shot_table
 from vlogcut.schemas import EDL, Shot, StyleProfile
+from vlogcut.validate.checks import Violation, validate_edl
 
 log = logging.getLogger(__name__)
 
 
 class PlannerError(RuntimeError):
     """The planner response is not JSON matching the EDL schema."""
+
+
+class LLMPlanResult(BaseModel):
+    """Last parsed EDL, its hard-check violations, and repair rounds actually used."""
+
+    edl: EDL
+    violations: list[Violation]
+    rounds: int = Field(ge=0)
+
+
+def format_violations(violations: Sequence[Violation]) -> str:
+    """Render one line per violation in input order, flattening message whitespace."""
+    if not violations:
+        return "No violations."
+    return "\n".join(
+        f"clip {v.clip_index if v.clip_index is not None else '-'} | {v.code} | "
+        f"{' '.join(v.message.split())}"
+        for v in violations
+    )
 
 
 def build_planner_messages(
@@ -105,3 +125,57 @@ def plan_with_llm(
     edl = parse_planner_response(router.complete("planner", messages))
     log.info("LLM planner parsed %d clips, %.1f s", len(edl.clips), edl.total_duration_s)
     return edl
+
+
+def plan_with_repair(
+    router: ModelRouter,
+    shots: Sequence[Shot],
+    *,
+    target_s: float,
+    profile: StyleProfile | None = None,
+    brief: str | None = None,
+    max_rounds: int = 2,
+) -> LLMPlanResult:
+    """Plan once, then retry parse/check failures for at most ``max_rounds`` rounds.
+
+    Each extra call counts as a repair round, including unparseable replies.
+    On exhaustion return the last parsed EDL and its violations, or raise
+    PlannerError if nothing parsed. Deterministic repair is a separate fallback.
+    """
+    if max_rounds < 0:
+        raise ValueError("max_rounds must be non-negative")
+    messages = build_planner_messages(shots, target_s=target_s, profile=profile, brief=brief)
+    last_edl: EDL | None = None
+    violations: list[Violation] = []
+    for round_index in range(max_rounds + 1):
+        log.info("LLM planner round %d/%d", round_index, max_rounds)
+        raw = router.complete("planner", messages)
+        try:
+            edl = parse_planner_response(raw)
+        except PlannerError as exc:
+            feedback = str(exc)
+            log.warning("LLM planner round %d: %s", round_index, feedback)
+            if round_index == max_rounds and last_edl is None:
+                raise
+        else:
+            last_edl = edl
+            violations = validate_edl(edl, shots, profile=profile, target_s=target_s)
+            log.info("LLM planner round %d: %d violations", round_index, len(violations))
+            if not violations:
+                return LLMPlanResult(edl=edl, violations=[], rounds=round_index)
+            feedback = format_violations(violations)
+        if round_index < max_rounds:
+            messages = [
+                *messages,
+                {"role": "assistant", "content": raw},
+                {
+                    "role": "user",
+                    "content": (
+                        f"The previous EDL has these errors:\n{feedback}\n\n"
+                        "Return a complete corrected EDL JSON obeying the same contract, "
+                        "with no explanation."
+                    ),
+                },
+            ]
+    assert last_edl is not None  # The final parse failure raises if no answer parsed.
+    return LLMPlanResult(edl=last_edl, violations=violations, rounds=max_rounds)
