@@ -8,7 +8,7 @@ Week-1 baseline and, later, the fallback when the planner's EDL cannot be repair
    by how much usable footage it has, best shot per chronological bin; "highlights" =
    the k best overall, then re-sorted by time; replace adjacent duplicate-group
    picks when a chronological, conflict-free alternative exists; after count fitting,
-   swap eligible shots toward measured kind alternation without reordering clips
+   swap eligible shots toward measured kind alternation, then speech duration share
 4. sample the profile's length distribution, using its mean to choose k; assign long
    samples to shots with room, shape intro pacing and montage bursts, then fit with
    one shared offset clamped to p10..p90 and each shot's usable part; adjust k to fit
@@ -415,6 +415,33 @@ def avoid_adjacent_duplicates(
     return result
 
 
+def _swap_fits(
+    picked: Sequence[_Candidate],
+    i: int,
+    candidate: _Candidate,
+    max_length_s: float,
+    min_total_s: float,
+    capacity: float,
+) -> bool:
+    """Preserve chronology, duplicate neighbours and capped duration capacity."""
+    previous = picked[i - 1] if i else None
+    following = picked[i + 1] if i + 1 < len(picked) else None
+    if (previous is not None and candidate.order <= previous.order) or (
+        following is not None and candidate.order >= following.order
+    ):
+        return False
+    group = candidate.shot.dup_group
+    if group is not None and any(
+        neighbour is not None and neighbour.shot.dup_group == group
+        for neighbour in (previous, following)
+    ):
+        return False
+    new_capacity = (
+        capacity - min(max_length_s, picked[i].avail) + min(max_length_s, candidate.avail)
+    )
+    return new_capacity >= min(min_total_s, capacity)
+
+
 def apply_kind_alternation(
     picked: Sequence[_Candidate],
     eligible: Sequence[_Candidate],
@@ -446,27 +473,10 @@ def apply_kind_alternation(
             kind = classify_kind(candidate.shot)
             if candidate.shot.shot_id in selected or kind is None:
                 continue
-            for i, original in enumerate(result):
+            for i in range(len(result)):
                 if kind == kinds[i]:
                     continue
-                previous = result[i - 1] if i else None
-                following = result[i + 1] if i + 1 < len(result) else None
-                if (previous is not None and candidate.order <= previous.order) or (
-                    following is not None and candidate.order >= following.order
-                ):
-                    continue
-                group = candidate.shot.dup_group
-                if group is not None and any(
-                    neighbour is not None and neighbour.shot.dup_group == group
-                    for neighbour in (previous, following)
-                ):
-                    continue
-                new_capacity = (
-                    capacity
-                    - min(max_length_s, original.avail)
-                    + min(max_length_s, candidate.avail)
-                )
-                if new_capacity < min(min_total_s, capacity):
+                if not _swap_fits(result, i, candidate, max_length_s, min_total_s, capacity):
                     continue
                 trial = kinds.copy()
                 trial[i] = kind
@@ -481,6 +491,74 @@ def apply_kind_alternation(
         i, candidate = replacement
         result[i] = candidate
         kinds[i] = classify_kind(candidate.shot)
+    return result
+
+
+def _estimated_speech_ratio(picked: Sequence[_Candidate], pace: DurationStats) -> float | None:
+    """Estimate talking / known-kind duration before length assignment and fitting."""
+    talking = total = 0.0
+    for candidate in picked:
+        kind = classify_kind(candidate.shot)
+        if kind is None:
+            continue
+        cap = min(pace.p90, candidate.avail)
+        length = cap if kind == "talking" else min(expected_length(pace), cap)
+        total += length
+        if kind == "talking":
+            talking += length
+    return talking / total if total else None
+
+
+def apply_speech_ratio(
+    picked: Sequence[_Candidate],
+    eligible: Sequence[_Candidate],
+    target: float,
+    pace: DurationStats,
+    *,
+    min_total_s: float = 0.0,
+    alternation: float | None = None,
+) -> list[_Candidate]:
+    """Make at most len(picked) strictly improving duration-share swaps, purely.
+
+    Prefer the largest gap reduction, then incoming blended score, earlier slot
+    and earlier candidate. A measured alternation gap must not grow. Unknown
+    incoming kinds are skipped, matching the alternation pass's eligibility.
+    """
+    result = list(picked)
+    for _ in range(len(picked)):
+        current = _estimated_speech_ratio(result, pace)
+        if current is None:
+            break
+        gap = abs(current - target)
+        current_alt = kind_alternation([classify_kind(c.shot) for c in result])
+        selected = {c.shot.shot_id for c in result}
+        capacity = sum(min(pace.p90, c.avail) for c in result)
+        best: tuple[float, float, int, int] | None = None
+        replacement: tuple[int, _Candidate] | None = None
+        for candidate in eligible:
+            if candidate.shot.shot_id in selected or classify_kind(candidate.shot) is None:
+                continue
+            for i in range(len(result)):
+                if not _swap_fits(result, i, candidate, pace.p90, min_total_s, capacity):
+                    continue
+                trial = result.copy()
+                trial[i] = candidate
+                measured = _estimated_speech_ratio(trial, pace)
+                if measured is None or abs(measured - target) >= gap:
+                    continue
+                if alternation is not None and current_alt is not None:
+                    trial_alt = kind_alternation([classify_kind(c.shot) for c in trial])
+                    if trial_alt is None or abs(trial_alt - alternation) > abs(
+                        current_alt - alternation
+                    ):
+                        continue
+                key = (abs(measured - target), -candidate.score, i, candidate.order)
+                if best is None or key < best:
+                    best, replacement = key, (i, candidate)
+        if replacement is None:
+            break
+        i, candidate = replacement
+        result[i] = candidate
     return result
 
 
@@ -607,6 +685,16 @@ def rough_cut(
         picked = apply_kind_alternation(
             picked, cands, alternation, max_length_s=pace.p90, min_total_s=target * (1 - tol)
         )
+    if profile is not None and profile.speech_ratio is not None:
+        picked = apply_speech_ratio(
+            picked,
+            cands,
+            profile.speech_ratio,
+            pace,
+            min_total_s=target * (1 - tol),
+            alternation=alternation,
+        )
+    if alternation is not None or (profile is not None and profile.speech_ratio is not None):
         lengths = _lengths(picked, pace, target, intro_ratio, montage)
         total = sum(lengths)
 
