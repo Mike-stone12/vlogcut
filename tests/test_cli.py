@@ -386,13 +386,51 @@ def test_style_show_and_diff(tmp_path, capsys):
     slow = _write_profile(tmp_path / "slow.json", 2.1, 3.4, 9.3, 9.0)
     assert cli.main(["style", "show", str(fast)]) == 0
     out = capsys.readouterr().out
-    assert "handmade" in out and "cuts/min" in out and "28.80" in out
-    assert "transitions   not measured" in out
+    # Exact output captured before kind_alternation became a distance dimension.
+    assert out == (
+        "fast.json: handmade\n"
+        "p10 shot s         0.60\n"
+        "median shot s      1.80\n"
+        "p90 shot s         5.20\n"
+        "cuts/min          28.80\n"
+        "transitions   not measured\n"
+    )
     assert cli.main(["style", "diff", str(fast), str(slow)]) == 0
     out = capsys.readouterr().out
-    assert "octaves" in out and "fast.json" in out and "slow.json" in out
-    for dim in ("p10", "median", "p90", "cuts/min"):
-        assert dim in out
+    # Only the existing unmeasured summary gains the new dimension's name.
+    assert out.replace(", kind_alternation", "") == (
+        "              fast.json  slow.json     delta\n"
+        "p10 shot s         0.60       2.10      1.81\n"
+        "median shot s      1.80       3.40      0.92\n"
+        "p90 shot s         5.20       9.30      0.84\n"
+        "cuts/min          28.80       9.00      1.68\n"
+        "distance      1.31 octaves; mean over 4 dims\n"
+        "not measured on both sides: intro_pace, beat_aligned_ratio, speech_ratio, "
+        "dissolve, montage_share, brightness, saturation, warmth\n"
+    )
+
+
+@pytest.mark.parametrize(("a_value", "b_value"), [(0.2, 0.7), (0.0, 0.0)])
+def test_style_show_and_diff_measured_kind_alternation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], a_value: float, b_value: float
+) -> None:
+    paths = [_write_profile(tmp_path / name, 1, 2, 4, 20) for name in ("a.json", "b.json")]
+    for path, value in zip(paths, [a_value, b_value], strict=True):
+        profile = json.loads(path.read_text(encoding="utf-8"))
+        profile["source_refs"] = ["edl"]
+        profile["structure"] = {"montage_share": 0, "kind_alternation": value}
+        path.write_text(json.dumps(profile), encoding="utf-8")
+        assert cli.main(["style", "show", str(path)]) == 0
+        rows = [line.split() for line in capsys.readouterr().out.splitlines()]
+        assert ["kind_alternation", f"{value:.2f}"] in rows
+    assert cli.main(["style", "diff", *map(str, paths)]) == 0
+    rows = [line.split() for line in capsys.readouterr().out.splitlines()]
+    assert [
+        "kind_alternation",
+        f"{a_value:.2f}",
+        f"{b_value:.2f}",
+        f"{abs(a_value - b_value):.2f}",
+    ] in rows
 
 
 def test_style_diff_measured_look(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:

@@ -109,6 +109,8 @@ flags are skipped: references are finished edits), then aggregate:
   before 20 s divided by the pooled body median (at least two shots in each pool).
   Talking ↔ b-roll alternation is measured for EDL-derived profiles supplied with
   analyzed shots; references skip quality analysis and leave it unmeasured.
+  Measured alternation contributes to style distance and appears in style show/diff;
+  planners and prompts do not use it.
   Intro length, speech ratio and cold-open measurement remain planned. Pacing alone
   reads as a speed slider; structure is what makes a cut recognisably someone's.
   Cold-open allowance is user-set. The rules planner uses the intro pacing ratio
@@ -374,8 +376,11 @@ Unmeasured alternation is omitted from serialized profiles to preserve existing
 JSON bytes; measured zero is included. Only `profile_from_edl(..., shots=...)`
 measures it, mapping shot IDs through `analyze/kind.classify_kind` in clip order;
 unknown IDs map to `None`. Reference videos skip quality analysis and leave
-alternation unmeasured. Distance, style show/diff, planners and prompts do not
-use this dimension.
+alternation unmeasured. Style distance uses its absolute difference when both
+profiles measure it, including zero; otherwise it is skipped and reported as
+unmeasured. Style show displays measured values; style diff displays a row when
+both sides measure it, otherwise listing it in the unmeasured summary. Planners
+and prompts do not use this dimension.
 
 `StyleProfile.cold_open_clips` is a non-negative, user-set integer defaulting to 0
 (no cold open), including when absent from old profile JSON. It exempts the first
@@ -575,7 +580,8 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   `intro_pace` from `structure.intro_pace_ratio`), so the unit is
   octaves (1.0 = twice as fast or slow); absolute difference for the ratio dimensions in
   [0, 1]: `beat_aligned_ratio`, `speech_ratio`, `dissolve` (`transitions.dissolve`),
-  `montage_share` (`structure.montage_share`), and look `brightness` and `saturation`.
+  `montage_share` (`structure.montage_share`), `kind_alternation`
+  (`structure.kind_alternation`), and look `brightness` and `saturation`.
   Look `warmth` uses |a - b| / 2 to map its [-1, 1] range onto [0, 1].
   A dimension unmeasured on either side is skipped and reported; if either look is
   `None`, all three look dimensions are skipped. Total is the mean over measured
@@ -590,6 +596,13 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 
 ## Decisions log
 
+- 2026-10-19: alternation distance and display — include measured `kind_alternation`
+  as an equally weighted absolute-difference dimension, including measured zero.
+  Skip and report it when either side is unmeasured, preserving previous totals.
+  Shared style show/diff formatters display it using the existing share convention;
+  without alternation, only the diff's unmeasured summary gains its name. Reference
+  measurement, schemas, serialization, planners and prompts are unchanged.
+
 - 2026-10-19: talking/b-roll alternation — **schema change**:
   `StructureStats.kind_alternation` is optional, bounded to [0, 1], and measured
   only by `profile_from_edl` when analyzed shots are supplied. Count differing
@@ -603,7 +616,8 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   required and its validation unchanged: successful EDL pacing always measures it,
   so an alternation-only structure cannot arise on this path. Supporting such a
   structure would require a separate change to the existing montage contract.
-  Distance, style show/diff, planners and prompts do not consume alternation.
+  Distance and style show/diff now consume alternation as described above;
+  planners and prompts still do not.
 
 - 2026-10-19: Shot.kind reuses the rules planner's `kept_for_audio` heuristic;
   no new speech detector or dependency. Explicit kinds take precedence. Rejected
