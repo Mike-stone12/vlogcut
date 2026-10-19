@@ -187,7 +187,8 @@ explainable, and it would break principle 2.
 - Variants = different knob settings: pacing ±, selection strategy
   (highlights vs. coverage), music choice, cold open on / off
 - Presentation: the CLI writes a local HTML page with the previews side by side and
-  pick / reject buttons that save a feedback JSON (no server)
+  pick / reject buttons that save a feedback JSON (no server). The static page
+  generator and JSON loader exist in `feedback/page.py`; CLI wiring remains planned.
 - Feedback (pick / reject / free text) → **feedback** role first *classifies* it:
   "the café part was too short" is about this edit and becomes a re-plan constraint;
   "too fast overall" is about style and becomes a validated `StyleProfile` delta.
@@ -216,8 +217,9 @@ file stem, such as `coverage_180s_fast`, until the `Run` manifest exists.
 `PreferencePair` records `context: str` (project/brief description, possibly empty),
 `chosen: str` and `rejected: str` (variant IDs). Both IDs must be non-empty after
 stripping whitespace, and `chosen != rejected`. Supplied strings are preserved.
-These contracts prepare the feedback loop to be logged from its first real use;
-file persistence and downstream consumers remain planned.
+The static variants page downloads a JSON array of `Feedback` records, validated by
+`feedback.load_feedback` and ready for `feedback.preference_pairs`. Preference-pair
+persistence and downstream consumers remain planned.
 
 `Shot.cut_points` holds code-proposed `CutPoint(time_s, kind)` candidates at absolute
 source-asset times, on the same timeline as `Shot.start_s` and `end_s`. Times must be
@@ -327,6 +329,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 5 · feedback: static variants page + feedback JSON loader (feedback/page.py)
 - [x] Week 5 · feedback: Feedback / PreferencePair contracts and pair derivation (schemas.py, feedback/pairs.py)
 - [x] Week 4 · pipeline: optional thread pool for per-asset analysis (pipeline.py, cli.py)
 - [x] Week 4 · plan: opt-in LLM planner wired into pipeline.cut and CLI (pipeline.py, cli.py)
@@ -865,6 +868,24 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   first-occurrence order, propagating context without mutating inputs. Missing picks
   or rejects yield an empty list. No pipeline/CLI wiring, HTML variants page,
   feedback-role classification or ranker yet.
+
+- 2026-11-09: static variants page and feedback loader — `feedback/page.py` builds
+  a self-contained HTML5 page with inline CSS/JS, side-by-side preview cards,
+  pick/reject/unset radios (unset by default), free text and a Save feedback button.
+  No server or external resources are added; supplied preview hrefs are preserved.
+  A Blob/object URL downloads `feedback.json`: an array of objects with
+  `variant_id`, `verdict` (pick/reject or null when unset), and `text`. Include only
+  entries with an explicit verdict or non-blank text, in page order, preserving
+  supplied strings. Empty variant lists and duplicate whitespace-stripped IDs fail.
+  HTML contexts use `html.escape(..., quote=True)`; script data uses `json.dumps`
+  with `<`, `>` and `&` escaped as `\u003c`, `\u003e` and `\u0026` to prevent
+  script breakouts. Identical inputs produce byte-identical output. The UTF-8 writer
+  atomically replaces the destination via a temporary file in the same directory,
+  cleaning up on failure. `load_feedback` validates with `TypeAdapter(list[Feedback])`,
+  accepts an empty array, preserves order/strings and feeds `preference_pairs`
+  directly. Invalid JSON, non-array roots and invalid records raise a single-line
+  `ValueError` naming the file. No schema changes, CLI/pipeline wiring, multi-variant
+  generation, Run manifest, pair persistence, feedback classification or ranker yet.
 
 ## Open questions
 
