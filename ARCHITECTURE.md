@@ -90,9 +90,9 @@ ingest → analyze → plan → validate/repair → render/export → feedback
 Run shot detection, transitions, VAD and (later) captions on reference videos (quality
 flags are skipped: references are finished edits), then aggregate:
 - Pacing: shot-duration p10/median/p90, cuts per minute, pacing curve (intro vs body)
-- Music: BPM, beat-aligned cut ratio (cut within ±80 ms of a beat), energy curve
-  (beat detection and alignment measurement exist in the pure `analyze/beats.py`
-  module; reference analysis and chosen-music integration remain unwired)
+- Music: beat-aligned cut ratio (cut within ±80 ms of a beat in the reference's own
+  audio), pooled over references with detected beats via `analyze/beats.py`.
+  Profile BPM, energy curve and chosen-music integration remain planned
 - Structure ("grammar"): intro length, speech ratio, talking ↔ b-roll alternation
   (transition counts between shot kinds), montage bursts (runs of short shots), cold
   open present or not. Pacing alone reads as a speed slider; structure is what makes a
@@ -196,8 +196,10 @@ sorted, unique, and strictly inside the shot; they need not be inside `usable_ra
 (the planner decides that). The field defaults to an empty list, so old shot JSON
 still loads. `kind` is only `pause` for now; other kinds will add literals later.
 
-`StyleProfile.beat_aligned_ratio` and `speech_ratio` remain `None` until their analysis
-is wired into profile building: `None` means "not measured", which is not the same as 0.
+`StyleProfile.beat_aligned_ratio` pools aligned cuts / total cuts over references with
+detected beats. It is `None` if beat detection is disabled for any reference, no
+reference has beats, or the pooled cut count is zero. `speech_ratio` remains `None`
+until its analysis is wired in: `None` means "not measured", which is not the same as 0.
 `StyleProfile.transitions: TransitionMix | None = None` follows the same convention:
 `hard_cut` and `dissolve` are shares in [0, 1], summing to 1 within 1e-6. Old profile
 JSON without this field still loads. The mix is unmeasured when dissolve detection is off
@@ -315,6 +317,7 @@ unrelated footage in a way viewers recognise. Protocol:
       `vlogcut style show / diff`, `tests/test_style_distance.py`)
 - [x] Week 2 · rules planner reproduces the profile's shot-length distribution
 - [x] Week 3 · style: transition mix from references (`style/profile.py`)
+- [x] Week 3 · style: beat-aligned cut ratio from references (style/profile.py)
 
 Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 
@@ -671,6 +674,22 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   Known gaps: tempo octave errors on real music and no tempo changes. There is no
   caching or wiring into the pipeline, style profiles, planner or validation;
   beat snapping remains planned. The `MusicTrack` storage question remains open.
+
+- 2026-10-29: reference beat alignment — `style/profile.py` decodes each reference
+  proxy's own audio with the shared signed-PCM mono decoder at 22050 Hz and uses
+  `analyze/beats.py` to detect beats. Sorted beat times are required in `ReferenceCuts`;
+  old records without them fail validation and trigger re-analysis. `ReferenceParams.beats`
+  defaults to true and participates in cache matching. Missing audio yields no beats.
+  Alignment uses the same surviving, rounded boundaries as pacing and transitions,
+  with inclusive ±80 ms tolerance. Pool aligned-cut counts / total-cut counts over
+  references with beats, not a mean of per-reference ratios; beatless references
+  contribute to pacing but are excluded from this pool. The ratio is `None` if detection
+  is disabled globally or for any reference, no reference has beats, or the pool has
+  zero cuts. Existing zero-cut pacing errors remain unchanged. Notes mention alignment
+  only when measured; otherwise their text is unchanged. Known gaps: tempo octave
+  errors on real music, no tempo changes, and footage without music gives no beats
+  when no regular pulse is detected. Chosen-music analysis, planner beat snapping,
+  `MusicTrack`, beat validation and speech ratio remain unwired; no schema change.
 
 ## Open questions
 
