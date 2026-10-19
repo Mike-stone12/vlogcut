@@ -35,6 +35,8 @@ WINDOWS_S = (0.3, 0.5, 0.75, 1.0, 1.5, 2.0)
 MIN_CHANGE = 0.05  # mean |A - B| on 0..1 luma
 MAX_CORR = 0.5
 MAX_RESIDUAL = 0.2
+BLACK_FADE_MAX_GAP_S = 1.0
+BLACK_FADE_MAX_LUMA = 0.06  # mean frame luma on 0..1, strictly below
 _FIT_POINTS = (0.25, 0.5, 0.75)
 _FIT_TOLERANCE = 0.02  # "almost as good" when picking the longest window in a group
 
@@ -111,12 +113,58 @@ def find_dissolves(
     return sorted(spans)
 
 
+def merge_black_fades(
+    dissolves: Sequence[tuple[float, float]],
+    mean_luma: Sequence[float],
+    fps: float,
+    *,
+    max_gap_s: float = BLACK_FADE_MAX_GAP_S,
+    max_luma: float = BLACK_FADE_MAX_LUMA,
+) -> tuple[list[tuple[float, float]], list[float]]:
+    """Pair consecutive fades across a short black gap; return spans and cut times.
+
+    Input spans are time-ordered, on the luma sample grid (as in find_dissolves).
+    Every sample from the fade-out end through the fade-in start must be below
+    max_luma, including a shared junction sample. Missing samples never imply black.
+    A pair keeps its full span for hard-cut suppression but cuts at the gap midpoint;
+    unpaired dissolves keep their original span and midpoint. Inputs are not mutated.
+    """
+    if fps <= 0 or max_gap_s < 0 or not 0 <= max_luma <= 1:
+        raise ValueError("fps must be positive, max_gap_s nonnegative and max_luma in [0, 1]")
+    spans: list[tuple[float, float]] = []
+    cuts: list[float] = []
+    i = 0
+    while i < len(dissolves):
+        start, end = dissolves[i]
+        if i + 1 < len(dissolves):
+            next_start, next_end = dissolves[i + 1]
+            first, last = round(end * fps), round(next_start * fps)
+            if (
+                0 <= next_start - end <= max_gap_s
+                and 0 <= first <= last < len(mean_luma)
+                and all(value < max_luma for value in mean_luma[first : last + 1])
+            ):
+                spans.append((start, next_end))
+                cuts.append((end + next_start) / 2)
+                i += 2
+                continue
+        spans.append((start, end))
+        cuts.append((start + end) / 2)
+        i += 1
+    return spans, cuts
+
+
 def merge_cuts(
-    hard: Sequence[float], transitions: Sequence[tuple[float, float]], min_gap_s: float
+    hard: Sequence[float],
+    transitions: Sequence[tuple[float, float]],
+    min_gap_s: float,
+    *,
+    transition_cuts: Sequence[float] | None = None,
 ) -> list[float]:
     """Cut times from hard cuts plus transition midpoints. A hard cut inside (or within
-    `min_gap_s` of) a transition is the detector firing on the blend, so it is dropped."""
-    mids = [(s + e) / 2 for s, e in transitions]
+    `min_gap_s` of) a transition is the detector firing on the blend, so it is dropped.
+    `transition_cuts` can override midpoints for merged fades through black."""
+    mids = [(s + e) / 2 for s, e in transitions] if transition_cuts is None else transition_cuts
     extra = [
         h for h in hard if all(not (s - min_gap_s <= h <= e + min_gap_s) for s, e in transitions)
     ]

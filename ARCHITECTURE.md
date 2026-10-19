@@ -137,7 +137,8 @@ flags are skipped: references are finished edits), then aggregate:
   measured `montage_share`, `intro_pace_ratio`, `kind_alternation`, `speech_ratio`
   and the cold-open allowance; validation is unchanged.
 - Transitions: share of hard cuts / dissolves (from `analyze/transitions.py`); fades
-  through black currently count as two dissolves
+  through black with a near-black gap of at most 1 s count as one dissolve and
+  one pacing cut at the black gap's midpoint
 - Audio: EDL-derived speech ratio measures talking timeline duration / known-kind
   timeline duration from analyzed shots, including clip speeds. The LLM prompt
   describes a measured value as guidance for the talking/b-roll duration split;
@@ -766,6 +767,18 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 
 ## Decisions log
 
+- 2026-10-19: reference fades through black — pair consecutive dissolve detections
+  when their gap is 0 to 1.0 s inclusive and every sampled frame from the first
+  end through the second start (or their shared junction) has mean luma strictly
+  below 0.06 on a 0–1 scale. Reuse loaded luma frames; missing samples do not merge.
+  Keep the full combined span to suppress hard-cut detections, but count one
+  dissolve boundary at the black gap midpoint for both transition shares and
+  pacing (shot durations and cuts/min); black does not form a separate shot.
+  Ordinary dissolves retain their midpoints; footage shot detection is unchanged.
+  Reference cache parameters include `black_fade_max_gap_s` and
+  `black_fade_max_luma`; missing parameters with dissolve detection enabled or
+  changed values cause a cache miss. No schema change or new dependency.
+
 - 2026-10-19: run manifest reader — add `run.load_run`, `run.format_run` and
   `vlogcut run show MANIFEST_JSON` for deterministic inspection of one explicit
   manifest file. Reuse `ValueError` for loading failures; schemas, fingerprinting
@@ -1227,7 +1240,7 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   holds `TransitionMix(hard_cut, dissolve)`; absent fields in old profiles mean not
   measured. Shares pool surviving dissolve boundaries / total surviving boundaries
   across references, after short-shot merging, matching the cuts/min denominator.
-  Fades through black count as two dissolves (known classification gap; no fade field).
+  Fades through short near-black gaps count as one dissolve (see 2026-10-19 above).
   If any reference has dissolve detection off, or there are no surviving cuts, the
   mix is `None` (a defensive guard; zero-cut references still raise the existing
   pacing error). Reference caches
