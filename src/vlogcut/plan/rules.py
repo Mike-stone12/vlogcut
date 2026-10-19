@@ -15,6 +15,7 @@ Week-1 baseline and, later, the fallback when the planner's EDL cannot be repair
    (someone talking) start at the beginning of the usable part and run as long as the
    pacing allows, so speech is less likely to be cut mid-sentence
 6. shift the rounded, fixed-length windows onto nearby cut-point candidates
+7. optionally move one later hook to the front when the profile allows a cold open
 
 `score` is pluggable so highlight features (faces, audio peaks, ...) can replace the
 quality-only default later.
@@ -24,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -242,6 +243,47 @@ def assign_transitions(
     return transitions
 
 
+def apply_cold_open(
+    clips: Sequence[Clip],
+    shots_by_id: Mapping[str, Shot],
+    *,
+    score: Callable[[Shot], float] = score_shot,
+) -> list[Clip]:
+    """Move one hook to the front without mutating clips or shots.
+
+    Prefer indices >= len(clips) // 2, then the remaining indices after zero.
+    Within each pool, higher shot scores win, with ties going to later clips.
+    Skip moves that create duplicate neighbours at either changed boundary.
+    All clip IDs must exist in shots_by_id. Fewer than three clips stay unchanged.
+    """
+    if len(clips) < 3:
+        return list(clips)
+    groups = [shots_by_id[c.shot_id].dup_group for c in clips]
+    candidates = sorted(
+        range(1, len(clips)),
+        key=lambda i: (i >= len(clips) // 2, score(shots_by_id[clips[i].shot_id]), i),
+        reverse=True,
+    )
+    for hook in candidates:
+        if groups[hook] is not None and groups[hook] == groups[0]:
+            continue
+        if (
+            hook + 1 < len(clips)
+            and groups[hook - 1] is not None
+            and groups[hook - 1] == groups[hook + 1]
+        ):
+            continue
+        order = [hook, *range(hook), *range(hook + 1, len(clips))]
+        return [
+            clips[i].model_copy(update={"transition_in": Transition()})
+            if i in (hook, 0, hook + 1)
+            else clips[i]
+            for i in order
+        ]
+    log.debug("Skipping cold open: no hook avoids duplicate neighbours")
+    return list(clips)
+
+
 def avoid_adjacent_duplicates(
     picked: Sequence[_Candidate],
     alternatives: Sequence[Sequence[_Candidate]],
@@ -338,8 +380,12 @@ def rough_cut(
     score: Callable[[Shot], float] = score_shot,
     *,
     max_shift_s: float | None = 1.0,
+    cold_open: bool = False,
 ) -> EDL:
-    """Build a rough cut, shifting onto candidates by at most max_shift_s (None: unbounded)."""
+    """Build a rough cut, shifting onto candidates by at most max_shift_s (None: unbounded).
+
+    cold_open opts into moving one later hook when profile.cold_open_clips permits it.
+    """
     params = params or RoughCutParams()
     pace = profile.shot_duration_s if profile else DEFAULT_PACING
     intro_ratio = (
@@ -387,6 +433,13 @@ def rough_cut(
         clip.transition_in = transition
     for clip, candidate in zip(clips, picked, strict=True):
         _place_clip(clip, candidate, max_shift_s=max_shift_s)
+    if cold_open and profile is not None and profile.cold_open_clips >= 1:
+        scores = {c.shot.shot_id: c.score for c in picked}
+        clips = apply_cold_open(
+            clips,
+            {c.shot.shot_id: c.shot for c in picked},
+            score=lambda shot: scores[shot.shot_id],
+        )
     notes = (
         f"rules/{params.strategy}: {len(clips)} of {len(cands)} usable shots "
         f"({len(shots) - len(cands)} rejected or too short), {total:.1f} s for a "

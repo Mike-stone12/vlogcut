@@ -106,8 +106,9 @@ flags are skipped: references are finished edits), then aggregate:
   counts between shot kinds), and cold-open measurement remain planned. Pacing alone
   reads as a speed slider; structure is what makes a cut recognisably someone's.
   Cold-open allowance is user-set. The rules planner uses the intro pacing ratio
-  to shape clip lengths before fitting the total; planners do not yet produce
-  bursts or cold opens.
+  to shape clip lengths before fitting the total and can produce one opt-in cold
+  open with `rough_cut(cold_open=True)` when the allowance is positive (not yet
+  wired into the pipeline or CLI). Planners do not yet produce montage bursts.
 - Transitions: share of hard cuts / dissolves (from `analyze/transitions.py`); fades
   through black currently count as two dissolves
 - Audio: speech-over-music ratio, whether clip audio is kept under music
@@ -282,7 +283,10 @@ JSON unchanged; the LLM planner does not yet use this dimension.
 in the day can precede the day from the beginning. Chronology starts afresh among
 the remaining clips; all other checks still apply to the opening clips. Reference
 analysis does not measure this allowance and keeps the default. It is not a style
-distance dimension; planners do not yet produce cold opens.
+distance dimension. The rules planner can move one later hook to the front when
+explicitly called with `cold_open=True` and this allowance is positive; it is off
+by default and not yet wired into the pipeline or CLI. Clip timing is preserved,
+the remaining clips stay chronological, and newly joined duplicate groups are avoided.
 
 `Clip.transition_in: Transition` defaults to a hard cut, so old EDL JSON still loads.
 `Transition.kind` is `cut` or `dissolve`; `duration_s` is 0 for a cut and strictly
@@ -381,6 +385,7 @@ unrelated footage in a way viewers recognise. Protocol:
 - [x] Week 4 · analyze: captioner core via ModelRouter (analyze/caption.py)
 - [x] Week 5 · feedback: feedback-role classification into edit constraints / profile deltas (feedback/classify.py)
 - [x] Week 3 · structure: rules planner honours intro_pace_ratio (plan/rules.py)
+- [x] Week 3 · structure: opt-in cold open in the rules planner (plan/rules.py)
 - [x] Week 5 · feedback: CLI page + pairs subcommands (cli.py)
 - [x] Week 5 · feedback: static variants page + feedback JSON loader (feedback/page.py)
 - [x] Week 5 · feedback: Feedback / PreferencePair contracts and pair derivation (schemas.py, feedback/pairs.py)
@@ -973,8 +978,8 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   apply to cold-open clips, including duplicate groups between actual neighbours
   within the opening and across its boundary; violation ordering is unchanged.
   Reference analysis keeps the default; notes, summaries and style distance do not
-  use this field. Planners do not yet produce cold opens; planner support and
-  reference measurement remain planned. Repair, pipeline and CLI are unchanged.
+  use this field. Opt-in rules planner support is described below; reference
+  measurement remains planned. Repair, pipeline and CLI are unchanged.
 
 - 2026-11-12: montage-burst share — **schema change**: optional
   `StyleProfile.structure` holds `StructureStats(montage_share)` with bounds [0, 1].
@@ -1093,6 +1098,24 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   tags use the existing JSON escaping; interest is an integer and missing values
   use `-`. The LLM prompt briefly describes these columns. Rejected-shot omission,
   the summary and deterministic input order are unchanged; no schema changes.
+
+- 2026-10-19: rules planner opt-in cold open — `rough_cut(cold_open=False)` leaves
+  the existing plan byte-identical by default, and also when the profile is absent
+  or `cold_open_clips` is zero. With opt-in and a positive allowance, run normal
+  planning first, then `plan/rules.apply_cold_open` moves exactly one selected hook
+  to the front if a safe move exists. Prefer the latter half by clip order (indices
+  >= floor(clip count / 2)), then earlier clips after index zero; within each pool,
+  use the existing shot scores, breaking ties toward later clips. Reuse the scores
+  already computed by the planner, including a supplied custom scorer. Reject moves
+  that join equal non-null duplicate groups at the front or across the removed
+  hook's old position; try the next candidate, logging at debug level if none fits.
+  Fewer than three clips stay unchanged. The helper does not mutate inputs; only
+  order and entry transitions change. The hook, original first clip, and hook's
+  original successor enter with hard cuts; all other transitions, in/out points,
+  speed, audio and clip metadata are preserved. Total duration is preserved to
+  floating-point precision and the remaining timeline stays chronological under
+  the existing cold-open allowance. No schema, validator, pipeline, CLI, LLM planner
+  or style changes; montage generation remains planned.
 
 ## Open questions
 
