@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from pydantic import ValidationError
@@ -22,6 +23,7 @@ from vlogcut.style.profile import (
     combine_cuts,
     duration_stats,
     intro_pace_ratio,
+    kind_alternation,
     montage_share,
     pooled_beat_ratio,
     shot_durations,
@@ -31,6 +33,12 @@ from vlogcut.style.profile import (
 # ---------------------------------------------------------------------------
 # pure aggregation
 # ---------------------------------------------------------------------------
+
+
+def test_aggregate_references_leave_kind_alternation_unmeasured() -> None:
+    profile = aggregate([_ref("a", 60, [10, 20, 30, 40])], ReferenceParams())
+    assert profile.structure is not None
+    assert profile.structure.kind_alternation is None
 
 
 def test_aggregate_look_weights_sampled_frames() -> None:
@@ -202,6 +210,25 @@ def test_montage_share(per_ref: list[list[float]], expected: float | None) -> No
 def test_montage_share_rejects_invalid_args(median_s: float, rel: float, min_run: int) -> None:
     with pytest.raises(ValueError):
         montage_share([], median_s, rel, min_run)
+
+
+@pytest.mark.parametrize(
+    ("kinds", "expected"),
+    [
+        ([], None),
+        (["talking"], None),
+        (["talking", "broll", "talking"], 1.0),
+        (["broll", "broll", "talking", "talking"], 1 / 3),
+        (["talking", None, "broll"], None),
+        (["talking", "broll", None, "broll", "broll"], 0.5),
+        (["broll", "broll"], 0.0),
+        ([None, None], None),
+    ],
+)
+def test_kind_alternation(
+    kinds: list[Literal["talking", "broll"] | None], expected: float | None
+) -> None:
+    assert kind_alternation(kinds) == expected
 
 
 def test_montage_share_custom_threshold_and_minimum_run() -> None:

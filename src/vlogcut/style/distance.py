@@ -15,11 +15,13 @@ otherwise. Pure functions, no numpy.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 
 from pydantic import BaseModel, Field
 
-from vlogcut.schemas import EDL, StyleProfile, TransitionMix
-from vlogcut.style.profile import profile_from_durations
+from vlogcut.analyze.kind import classify_kind
+from vlogcut.schemas import EDL, Shot, StyleProfile, TransitionMix
+from vlogcut.style.profile import kind_alternation, profile_from_durations
 
 LOG_DIMS = ("p10", "median", "p90", "cuts_per_min", "intro_pace")  # |log2 ratio|
 RATIO_DIMS = ("beat_aligned_ratio", "speech_ratio", "dissolve", "montage_share")  # |difference|
@@ -89,11 +91,20 @@ def profile_distance(a: StyleProfile, b: StyleProfile) -> StyleDistance:
     return StyleDistance(total=total, per_dim=per_dim, unmeasured=unmeasured)
 
 
-def profile_from_edl(edl: EDL, source: str = "edl") -> StyleProfile:
-    """Measure timeline pacing, structure and transition mix without rendering."""
+def profile_from_edl(
+    edl: EDL, source: str = "edl", *, shots: Sequence[Shot] | None = None
+) -> StyleProfile:
+    """Measure pacing, structure and transitions; supplied shots enable kind alternation."""
     profile = profile_from_durations([[c.timeline_duration_s for c in edl.clips]], [source])
     dissolve = sum(c.transition_in.kind == "dissolve" for c in edl.clips) / (len(edl.clips) - 1)
     profile.transitions = TransitionMix(hard_cut=1 - dissolve, dissolve=dissolve)
+    if shots:
+        kinds = {shot.shot_id: classify_kind(shot) for shot in shots}
+        # Successful pacing measurement always includes the required montage share.
+        assert profile.structure is not None
+        profile.structure.kind_alternation = kind_alternation(
+            [kinds.get(clip.shot_id) for clip in edl.clips]
+        )
     return profile
 
 

@@ -78,7 +78,8 @@ ingest → analyze → plan → validate/repair → render/export → feedback
   `analyze/kind.py`, populated by the pipeline on fresh analysis and cache hits.
   This is the rules planner's audio-activity heuristic, not speech-specific VAD;
   rejected shots remain unmeasured because quality analysis clears their warnings.
-  Caption-based refinement and talking/b-roll alternation measurement remain planned
+  Caption-based refinement remains planned; EDL-derived profiles can measure
+  talking/b-roll alternation from these kinds
 - Caption: **captioner** role (VLM) on 1–3 keyframes → description, tags, interest 1–5.
   The core and cached batch layer exist in `analyze/caption.py` via `ModelRouter`,
   with rejected-shot filtering and caching (model name in the cache key).
@@ -106,8 +107,9 @@ flags are skipped: references are finished edits), then aggregate:
   runs of at least three shots shorter than half the pooled median, within each
   reference. Intro-vs-body pacing is the pooled median duration of shots starting
   before 20 s divided by the pooled body median (at least two shots in each pool).
-  Intro length, speech ratio, talking ↔ b-roll alternation (transition
-  counts between shot kinds), and cold-open measurement remain planned. Pacing alone
+  Talking ↔ b-roll alternation is measured for EDL-derived profiles supplied with
+  analyzed shots; references skip quality analysis and leave it unmeasured.
+  Intro length, speech ratio and cold-open measurement remain planned. Pacing alone
   reads as a speed slider; structure is what makes a cut recognisably someone's.
   Cold-open allowance is user-set. The rules planner uses the intro pacing ratio
   to shape clip lengths before fitting the total, uses measured `montage_share`
@@ -363,6 +365,18 @@ JSON unchanged. The LLM planner prompt describes the measured ratio and an
 approximate intro median in seconds, using the profile median as the body estimate;
 validation is unchanged.
 
+`StructureStats.kind_alternation: float | None = None` is the share of adjacent
+known-kind pairs whose kinds differ, constrained to [0, 1]. Unknown kinds break
+adjacency: skip pairs touching `None`, never bridge across them. Zero eligible
+pairs yields `None` (not measured), distinct from measured zero (all eligible
+pairs have equal kinds). Old structure JSON without the field loads with `None`.
+Unmeasured alternation is omitted from serialized profiles to preserve existing
+JSON bytes; measured zero is included. Only `profile_from_edl(..., shots=...)`
+measures it, mapping shot IDs through `analyze/kind.classify_kind` in clip order;
+unknown IDs map to `None`. Reference videos skip quality analysis and leave
+alternation unmeasured. Distance, style show/diff, planners and prompts do not
+use this dimension.
+
 `StyleProfile.cold_open_clips` is a non-negative, user-set integer defaulting to 0
 (no cold open), including when absent from old profile JSON. It exempts the first
 `min(cold_open_clips, len(clips))` EDL clips from chronology only: a hook from later
@@ -408,7 +422,7 @@ Planned additions (remaining fields land with the module that needs them):
 | Field / model | Why |
 |---|---|
 | `MusicCue.end_s`, ducking params | music mixing needs an end and a level under speech |
-| `StyleProfile.structure` | exists with `montage_share` and `intro_pace_ratio`; talking/b-roll alternation, intro length and cold-open measurement remain planned |
+| `StyleProfile.structure` | exists with `montage_share`, `intro_pace_ratio` and EDL-derived `kind_alternation`; reference alternation, intro length and cold-open measurement remain planned |
 | `Run` manifest (inputs fingerprint → outputs) | EDL file names collide once profile version, brief, variant and model all vary |
 
 Cached JSON stores paths inside the workspace as relative POSIX strings, so a moved
@@ -486,6 +500,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 3 · style: talking/b-roll alternation measured for EDL-derived profiles (schemas.py, style/)
 - [x] Week 3 · analyze: Shot.kind talking / broll from the existing speech signal (schemas.py, analyze/kind.py)
 - [x] Week 4 · learn: shot pairs derived from variant preference pairs (learn/feedback_pairs.py)
 - [x] Week 4 · plan: opt-in ranker scores in cut via --ranker (pipeline.py, cli.py, plan/llm.py)
@@ -574,6 +589,21 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: talking/b-roll alternation — **schema change**:
+  `StructureStats.kind_alternation` is optional, bounded to [0, 1], and measured
+  only by `profile_from_edl` when analyzed shots are supplied. Count differing
+  known adjacent pairs / all known adjacent pairs in clip order. Unknown IDs and
+  unmeasured kinds break adjacency; no eligible pairs means `None`, not zero.
+  Reuse `classify_kind`, including explicit kinds and the `kept_for_audio` fallback.
+  Reference analysis remains unchanged because it has no quality-derived kinds.
+  Omit unmeasured alternation during serialization to preserve existing JSON bytes,
+  including EDL profiles with omitted, `None` or empty shots. Use a wrap serializer
+  compatible with the existing Pydantic minimum version. Keep `montage_share`
+  required and its validation unchanged: successful EDL pacing always measures it,
+  so an alternation-only structure cannot arise on this path. Supporting such a
+  structure would require a separate change to the existing montage contract.
+  Distance, style show/diff, planners and prompts do not consume alternation.
 
 - 2026-10-19: Shot.kind reuses the rules planner's `kept_for_audio` heuristic;
   no new speech detector or dependency. Explicit kinds take precedence. Rejected
