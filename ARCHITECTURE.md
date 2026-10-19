@@ -97,7 +97,8 @@ flags are skipped: references are finished edits), then aggregate:
   is measured under structure; a full pacing curve remains planned
 - Music: beat-aligned cut ratio (cut within ±80 ms of a beat in the reference's own
   audio), pooled over references with detected beats via `analyze/beats.py`.
-  Profile BPM, energy curve and chosen-music integration remain planned
+  Chosen-music beat snapping is wired as opt-in via `pipeline.cut(music=...)`.
+  Profile BPM and energy curve remain planned
 - Structure ("grammar"): montage bursts are now measured as the share of shots in
   runs of at least three shots shorter than half the pooled median, within each
   reference. Intro-vs-body pacing is the pooled median duration of shots starting
@@ -158,10 +159,14 @@ explainable, and it would break principle 2.
   a JSON list to `edl/<stem>.violations.json`, replacing any previous report even
   when empty. The CLI reports the results; violations are non-fatal and rendering
   continues. Check coverage and current limits are recorded under 2026-10-26 below.
-- Deterministic post-processing: `plan/snap.snap_to_beats` exists as a pure helper
-  to snap boundaries to the nearest beat within tolerance, but is not wired in.
-  Chosen-music analysis, pipeline wiring after planning and before checks, and
-  `MusicTrack` remain planned, as do audio fades and subtitle timing from ASR.
+- Deterministic post-processing: `pipeline.cut(music=...)` decodes user music with
+  the existing mono-audio loader and detects beats via `analyze/beats.detect_beats`.
+  After rules or LLM planning, `plan/snap.snap_to_beats` snaps boundaries to the
+  nearest beat within its default tolerance, before checks and deterministic repair.
+  Music starts at timeline 0; without music there is no snapping and EDL bytes are
+  unchanged. No detected beats logs a warning and leaves timing unchanged; missing
+  music files fail before planning and missing analysis dependencies raise ImportError.
+  `MusicTrack`, audio fades and subtitle timing from ASR remain planned.
 - Hard checks (code): shot ids exist; in/out inside shot bounds; no rejected shots;
   total duration within ±10 % of target; clip durations within the profile range
   (with tolerance); no back-to-back clips from the same `dup_group`; chronological
@@ -181,7 +186,7 @@ explainable, and it would break principle 2.
   this validation/repair/render flow with `--planner llm` (two extra rounds by
   default). If no reply parses, a warning is logged and rules planning takes over;
   every resulting EDL goes through the same checks and deterministic repair.
-  Beat snapping integration remains planned.
+  With user music, these checks and repairs receive the beat-snapped EDL.
 
 ### 6. Render / export
 - Preview mp4 (`render/preview.py`): FFmpeg on proxies (fast, low-res); cached clip
@@ -381,6 +386,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 3 · music: opt-in beat snapping of planned EDLs to user music (pipeline.py)
 - [x] Week 4 · analyze: opt-in captioning wired into pipeline and CLI (pipeline.py, cli.py)
 - [x] Week 4 · analyze: captioner core via ModelRouter (analyze/caption.py)
 - [x] Week 5 · feedback: feedback-role classification into edit constraints / profile deltas (feedback/classify.py)
@@ -448,6 +454,12 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: opt-in music beat snapping — `pipeline.cut(music=...)` treats music
+  beats as timeline times starting at 0. Snap after either planner and before checks
+  and deterministic repair, so reports and `CutResult.violations` reflect the final
+  snapped EDL. No music means no snapping and byte-identical EDL output. Existing
+  music cues and preview behavior are preserved; no schema or CLI changes.
 
 - 2026-10: v1 targets daily vlogs; chronological timeline; user-supplied music only.
 - 2026-10: role-based model config; local captioner + API planner as default hybrid.

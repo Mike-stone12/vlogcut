@@ -18,6 +18,7 @@ from vlogcut.schemas import (
     Clip,
     DurationStats,
     MediaAsset,
+    MusicCue,
     QualityFlags,
     Shot,
     StyleProfile,
@@ -75,6 +76,154 @@ def _edl(shot_id: str = "s") -> EDL:
         variant_id="test", target_duration_s=1,
         clips=[Clip(shot_id=shot_id, in_s=0, out_s=1)],
     )  # fmt: skip
+
+
+@pytest.mark.parametrize("planner", ["rules", "llm"])
+@pytest.mark.parametrize("repair", [False, True])
+def test_music_snaps_before_validation_and_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_analysis: None,
+    planner: str,
+    repair: bool,
+) -> None:
+    from vlogcut.analyze.beats import BeatParams, BeatResult
+
+    shots = _shots()
+    shots.append(shots[0].model_copy(update={"shot_id": "s2"}))
+    monkeypatch.setattr(pipeline, "analyze", lambda *args: shots)
+    clips = [Clip(shot_id="s", in_s=1, out_s=1.76), Clip(shot_id="s2", in_s=1, out_s=2)]
+    if repair:
+        clips.append(Clip(shot_id="missing", in_s=0, out_s=1))
+    edl = EDL(variant_id="test", target_duration_s=1.76 + repair, clips=clips)
+    target_s = edl.total_duration_s
+    profile = StyleProfile(shot_duration_s=DurationStats(p10=1, median=1, p90=1), cuts_per_min=60)
+    style = tmp_path / "style.json"
+    style.write_text(profile.model_dump_json(), encoding="utf-8")
+    assert "clip_too_short" not in {
+        v.code for v in validate_edl(edl, shots, profile, target_s=target_s)
+    }
+    monkeypatch.setattr(plan, "rough_cut", lambda *args, **kwargs: edl)
+    router = _router(tmp_path, FakeClient([edl.model_dump_json()])) if planner == "llm" else None
+    music = tmp_path / "music.wav"
+    music.touch()
+    samples = object()
+    calls: list[tuple[object, int]] = []
+
+    def load(path: Path, rate: int) -> object:
+        assert path == music
+        assert rate == BeatParams().sample_rate
+        return samples
+
+    def detect(audio: object, rate: int) -> BeatResult:
+        calls.append((audio, rate))
+        return BeatResult(bpm=120, beats=[0.71])
+
+    monkeypatch.setattr(pauses, "load_mono_audio", load)
+    monkeypatch.setattr("vlogcut.analyze.beats.detect_beats", detect)
+    repair_if_needed = pipeline.repair_if_needed
+
+    def check_repair_input(planned: EDL, *args: Any) -> tuple[EDL, bool]:
+        assert planned.clips[0].timeline_duration_s == pytest.approx(0.71)
+        assert "clip_too_short" in {v.code for v in args[1]}
+        return repair_if_needed(planned, *args)
+
+    monkeypatch.setattr(pipeline, "repair_if_needed", check_repair_input)
+    rendered: list[EDL] = []
+    monkeypatch.setattr("vlogcut.render.render_preview", lambda edl, *a, **kw: rendered.append(edl))
+    result = pipeline.cut(
+        tmp_path, tmp_path, target_s=target_s, music=music, style=style,
+        planner=planner, router=router, max_repair_rounds=0,
+    )  # fmt: skip
+    assert calls == [(samples, BeatParams().sample_rate)]
+    assert result.edl.clips[0].timeline_duration_s == pytest.approx(0.71)
+    assert result.edl.clips[1].in_s == pytest.approx(0.95)
+    assert result.edl.music == [MusicCue(track_id="music", gain_db=-14)]
+    assert result.repaired == repair
+    assert rendered == [result.edl]
+    assert result.violations == validate_edl(result.edl, shots, profile, target_s=target_s)
+    assert "clip_too_short" in {v.code for v in result.violations}
+    assert EDL.model_validate_json(result.edl_path.read_text(encoding="utf-8")) == result.edl
+    assert json.loads(result.edl_path.with_suffix(".violations.json").read_text()) == [
+        v.model_dump(mode="json") for v in result.violations
+    ]
+
+
+@pytest.mark.parametrize("explicit_none", [False, True])
+def test_no_music_preserves_edl_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_analysis: None, explicit_none: bool
+) -> None:
+    assets, _ = pipeline.ingest([], tmp_path)
+    expected = plan.rough_cut(_shots(), assets, plan.RoughCutParams(target_s=3), None)
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(expected.model_dump_json(indent=1), encoding="utf-8")
+    for target in (
+        "vlogcut.analyze.pauses.load_mono_audio",
+        "vlogcut.analyze.beats.detect_beats",
+        "vlogcut.plan.snap.snap_to_beats",
+    ):
+        monkeypatch.setattr(target, lambda *args: pytest.fail("unexpected music analysis/snapping"))
+    result = pipeline.cut(
+        tmp_path, tmp_path, target_s=3, render=False, **({"music": None} if explicit_none else {})
+    )
+    assert result.edl == expected
+    assert result.edl_path.read_bytes() == baseline.read_bytes()
+
+
+@pytest.mark.parametrize("no_audio", [False, True])
+def test_music_without_beats_keeps_edl_and_warns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_analysis: None,
+    caplog: pytest.LogCaptureFixture,
+    no_audio: bool,
+) -> None:
+    from vlogcut.analyze.beats import BeatResult
+
+    edl = _edl()
+    expected = edl.model_copy(deep=True)
+    expected.music = [MusicCue(track_id="music", gain_db=-14)]
+    monkeypatch.setattr(plan, "rough_cut", lambda *args, **kwargs: edl)
+    monkeypatch.setattr(pauses, "load_mono_audio", lambda *args: None if no_audio else object())
+    monkeypatch.setattr("vlogcut.analyze.beats.detect_beats", lambda *args: BeatResult(None, []))
+    monkeypatch.setattr(
+        "vlogcut.plan.snap.snap_to_beats", lambda *args: pytest.fail("unexpected snapping")
+    )
+    music = tmp_path / "music.wav"
+    music.touch()
+    result = pipeline.cut(tmp_path, tmp_path, target_s=1, music=music, render=False)
+    assert result.edl == expected
+    assert result.violations == []
+    assert any(
+        r.levelname == "WARNING" and "No beats detected" in r.message for r in caplog.records
+    )
+
+
+def test_missing_music_fails_before_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pipeline, "find_footage", lambda *args: pytest.fail("scanned footage"))
+    monkeypatch.setattr(plan, "rough_cut", lambda *args: pytest.fail("planned footage"))
+    with pytest.raises(FileNotFoundError, match="music file.*missing.wav"):
+        pipeline.cut(tmp_path, tmp_path, music=tmp_path / "missing.wav")
+
+
+@pytest.mark.parametrize("stage", ["decode", "detect"])
+def test_music_dependency_error_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_analysis: None, stage: str
+) -> None:
+    error = ImportError("No module named 'numpy'")
+
+    def fail(*args: object) -> None:
+        raise error
+
+    music = tmp_path / "music.wav"
+    music.touch()
+    monkeypatch.setattr(
+        pauses, "load_mono_audio", fail if stage == "decode" else lambda *a: object()
+    )
+    monkeypatch.setattr("vlogcut.analyze.beats.detect_beats", fail)
+    with pytest.raises(ImportError, match="music beat detection needs:.*analyze") as raised:
+        pipeline.cut(tmp_path, tmp_path, target_s=3, music=music, render=False)
+    assert raised.value.__cause__ is error
 
 
 @pytest.mark.parametrize("planner", ["rules", "llm"])
