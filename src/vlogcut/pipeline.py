@@ -16,11 +16,14 @@ from pydantic import BaseModel, Field
 
 from vlogcut.ingest import ProbeError, make_proxy, probe_asset
 from vlogcut.schemas import EDL, MediaAsset, MusicCue, Shot, StyleProfile
-from vlogcut.validate import Violation, validate_edl
+from vlogcut.validate import Violation, repair_edl, validate_edl
 
 log = logging.getLogger(__name__)
 
 VIDEO_SUFFIXES = {".mov", ".mp4", ".m4v", ".mkv", ".avi", ".webm", ".mts", ".3gp"}
+REPAIRABLE_CODES = frozenset(
+    {"unknown_shot", "rejected_shot", "transition_not_allowed", "dissolve_too_long"}
+)
 
 Progress = Callable[[str], None]
 
@@ -34,6 +37,7 @@ class CutResult(BaseModel):
     preview_path: Path | None
     profile: StyleProfile | None = None  # the style the cut was paced with, if any
     violations: list[Violation] = Field(default_factory=list)
+    repaired: bool = False
 
 
 def find_footage(folder: str | Path) -> list[Path]:
@@ -109,6 +113,26 @@ def validate_and_write(
     return violations
 
 
+def repair_if_needed(
+    edl: EDL,
+    shots: Sequence[Shot],
+    violations: Sequence[Violation],
+    profile: StyleProfile | None = None,
+) -> tuple[EDL, bool]:
+    """Apply the deterministic fallback only for repairable validation codes.
+
+    Keep the original EDL if all clips would be dropped. The caller must validate
+    a repaired EDL again, since remaining violations and clip indices can change.
+    """
+    if not any(v.code in REPAIRABLE_CODES for v in violations):
+        return edl, False
+    try:
+        return repair_edl(edl, shots, profile), True
+    except ValueError as exc:
+        log.warning("EDL repair failed; keeping original EDL and violations: %s", exc)
+        return edl, False
+
+
 def cut(
     folder: str | Path,
     workspace: str | Path,
@@ -152,6 +176,12 @@ def cut(
     violations = validate_and_write(edl, shots, edl_path, target_s=target_s, profile=profile)
     edl_path.parent.mkdir(parents=True, exist_ok=True)
     edl_path.write_text(edl.model_dump_json(indent=1), encoding="utf-8")
+    edl, repaired = repair_if_needed(edl, shots, violations, profile)
+    if repaired:
+        temp = edl_path.with_suffix(".json.part")
+        temp.write_text(edl.model_dump_json(indent=1), encoding="utf-8")
+        temp.replace(edl_path)
+        violations = validate_and_write(edl, shots, edl_path, target_s=target_s, profile=profile)
     shots_path = workspace / "shots.json"
     shots_path.write_text(
         json.dumps([s.model_dump(mode="json") for s in shots], ensure_ascii=False, indent=1),
@@ -169,5 +199,5 @@ def cut(
         )  # fmt: skip
     return CutResult(
         assets=assets, skipped=skipped, shots=shots, edl=edl, edl_path=edl_path,
-        preview_path=preview, profile=profile, violations=violations,
+        preview_path=preview, profile=profile, violations=violations, repaired=repaired,
     )  # fmt: skip

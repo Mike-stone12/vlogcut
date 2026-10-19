@@ -149,9 +149,13 @@ explainable, and it would break principle 2.
   types and audio modes allowed by the profile
 - A pure rule-based fallback helper, `validate/repair.repair_edl`, drops unknown or
   rejected clips and repairs transitions without changing retained selections or
-  timing. It exists but is not wired into the pipeline. The LLM repair loop
-  (structured errors sent back to the planner for at most N rounds), fallback
-  integration and beat snapping integration remain planned.
+  timing. It now runs in `pipeline.cut` when checks report a repairable violation.
+  Successful repair atomically replaces the EDL JSON and re-runs validation before
+  rendering, so the report, `CutResult.violations` and preview reflect the final EDL.
+  If all clips would be dropped, a warning is logged and the original EDL and
+  violations are kept. `CutResult.repaired` and an extra CLI line report applied
+  repairs; clean EDLs are unchanged. The LLM repair loop (structured errors sent
+  back to the planner for at most N rounds) and beat snapping integration remain planned.
 
 ### 6. Render / export
 - Preview mp4 (`render/preview.py`): FFmpeg on proxies (fast, low-res); cached clip
@@ -302,6 +306,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · validate: deterministic repair wired into pipeline.cut after checks (pipeline.py, cli.py)
 - [x] Week 4 · validate: deterministic repair helper for unknown/rejected clips and transitions (validate/repair.py)
 - [x] Week 4 · validate: checks run on every planned EDL, reported by the CLI (pipeline.py, cli.py)
 - [x] Week 4 · validate: deterministic hard checks (validate/checks.py)
@@ -720,6 +725,20 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   follows the remaining clips. Bounds, chronology, duplicate, target and pacing
   violations remain reported, not repaired. No new selections, schema changes,
   beat snapping, LLM repair rounds or pipeline/CLI wiring.
+
+- 2026-11-01: deterministic repair fallback — `pipeline.REPAIRABLE_CODES` triggers
+  `repair_edl` only for `unknown_shot`, `rejected_shot`, `transition_not_allowed`
+  or `dissolve_too_long` (oversized boundaries or overlapping half-windows).
+  Repair uses the same shots and optional profile as validation. On success, the
+  EDL JSON is atomically replaced via a temp file, then validation runs again with
+  the same requested target and profile. The violations JSON, `CutResult.violations`
+  and rendered preview all describe the repaired EDL. If repair raises `ValueError`
+  because all clips would be dropped, log a warning and continue with the original
+  EDL and violations. No repair is attempted without a trigger code; clean EDL JSON
+  and violations output remain byte-identical. `CutResult.repaired` defaults to
+  false; the CLI prints one repair line before the validation summary when true,
+  with unchanged exit codes. Bounds, chronology, duplicate, target and pacing
+  violations are still not repaired; no schema changes, LLM loop or beat snapping.
 
 ## Open questions
 
