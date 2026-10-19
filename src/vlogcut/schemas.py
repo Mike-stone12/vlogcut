@@ -72,7 +72,7 @@ class CutPoint(BaseModel):
     """Code-proposed cut at an absolute time on the source asset's timeline."""
 
     time_s: float
-    kind: Literal["pause"]
+    kind: Literal["pause", "motion"]
 
 
 class Shot(BaseModel):

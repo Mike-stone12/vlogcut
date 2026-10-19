@@ -91,8 +91,9 @@ ingest → analyze → plan → validate/repair → render/export → feedback
   default; ungrouped shots retain per-shot captioning.
 - Cut-point candidates: energy-based audio pauses populate `Shot.cut_points` during
   analysis. The rules planner shifts fixed-length clips onto nearby candidates after
-  length fitting and rounding. Beats of the chosen music, motion minima and LLM
-  planner use remain planned
+  length fitting and rounding. Pure motion-minimum and candidate-merge helpers
+  exist in `analyze/motion_cuts.py`; motion pipeline wiring remains planned.
+  Beats of the chosen music as cut candidates and LLM planner use remain planned
 - Output: `Shot` records, cached in `workspace/<project>/`. Per-asset work is
   independent; `pipeline.py` can run it in a thread pool via `workers` / `--jobs`
   (default 1, sequential).
@@ -386,7 +387,8 @@ trains and saves the ranker from feedback for `cut --ranker MODEL_JSON`.
 source-asset times, on the same timeline as `Shot.start_s` and `end_s`. Times must be
 sorted, unique, and strictly inside the shot; they need not be inside `usable_range`
 (the planner decides that). The field defaults to an empty list, so old shot JSON
-still loads. `kind` is only `pause` for now; other kinds will add literals later.
+still loads. `kind` accepts `pause` and `motion`; existing pause-only JSON retains
+the same serialized bytes.
 
 `StyleProfile.beat_aligned_ratio` pools aligned cuts / total cuts over references with
 detected beats. It is `None` if beat detection is disabled for any reference, no
@@ -751,6 +753,20 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: motion-minimum cut helpers — `analyze/motion_cuts.py` uses pure
+  Python over supplied nonnegative motion samples. Defaults: `min_gap_s=0.5`,
+  `edge_margin_s=0.1` (matching pauses), and `max_relative_level=0.5`, admitting
+  minima at or below half the shot signal's median. Plateaus need strictly higher
+  neighbours on both sides and use their first sample. Filter strict interior
+  margins before greedily keeping lowest minima, earlier on ties; candidates
+  exactly the minimum gap apart survive. Empty, constant and fewer than three
+  samples yield no candidates. `CutPoint.kind` now also accepts `motion`, without
+  changing defaults, validation or existing pause serialization. Merge defaults
+  to `tolerance_s=0.1`: every motion point within that inclusive distance of any
+  pause is removed; distinct same-kind times survive, exact duplicates collapse,
+  and output is sorted. Merge inputs must belong to the same shot. No signal
+  extraction, pipeline/CLI wiring or planner behavior changes.
 
 - 2026-10-19: reference music tempo guidance — the initial LLM prompt adds one line
   after speech-ratio guidance for measured `music_bpm`, giving one-decimal BPM and

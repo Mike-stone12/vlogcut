@@ -128,7 +128,24 @@ def test_shot_rejects_invalid_cut_points(times: list[float]) -> None:
 
 def test_cut_point_rejects_other_kinds() -> None:
     with pytest.raises(ValidationError, match="kind"):
-        CutPoint.model_validate({"time_s": 12, "kind": "motion"})
+        CutPoint.model_validate({"time_s": 12, "kind": "beat"})
+
+
+def test_motion_cut_point_round_trip() -> None:
+    point = CutPoint(time_s=12, kind="motion")
+    assert CutPoint.model_validate_json(point.model_dump_json()) == point
+
+
+def test_pause_only_shot_preserves_serialized_bytes() -> None:
+    # Captured from the schema before adding the motion literal.
+    payload = (
+        b'{"shot_id":"s","asset_id":"a","start_s":10.0,"end_s":14.0,"keyframes":[],'
+        b'"quality":{"sharpness":50.0,"exposure_clip":0.0,"shake":0.0,"rejected":false,'
+        b'"reject_reasons":[],"warnings":[],"usable_range":null},"kind":null,"caption":null,'
+        b'"tags":[],"interest":null,"transcript":null,"dup_group":null,'
+        b'"cut_points":[{"time_s":12.0,"kind":"pause"}]}'
+    )
+    assert Shot.model_validate_json(payload).model_dump_json().encode() == payload
 
 
 def test_clip_speed_changes_timeline_duration():
