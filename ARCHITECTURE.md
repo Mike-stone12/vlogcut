@@ -139,8 +139,10 @@ standardisation stored alongside weights in a JSON-round-trippable `RankerModel`
 Features use existing shot durations, usable ranges, quality metrics, warning and
 cut-point counts, and interest; missing optional values have explicit indicators.
 Training and scoring run locally on CPU with no new dependencies. Callers decide
-whether to exclude rejected shots. The ranker is not yet wired into planners or
-the shot table; draft import and deriving shot pairs from feedback remain planned.
+whether to exclude rejected shots. The shot table accepts optional precomputed
+ranker scores keyed by shot ID, without importing the ranker. The pipeline, CLI
+and rules planner do not use them yet; draft import and deriving shot pairs from
+feedback remain planned.
 No CLIP embedding is used yet. No end-to-end "video → edit" model: there is no data
 for it, it is not explainable, and it would break principle 2.
 
@@ -148,6 +150,11 @@ for it, it is not explainable, and it would break principle 2.
 - Input: shot table as text (id, time, duration, kind, caption, tags, quality, ranker
   score, cut-point candidates), `StyleProfile`, user brief ("~3 min, cozy, focus on
   the café"), variant knobs
+- `plan/shot_table.py` accepts optional precomputed `ranker_scores` keyed by shot ID.
+  When supplied, a `rank` column follows interest: two decimals, `-` for missing
+  scores, higher = more likely chosen, relative within this table only. Scores for
+  supplied shots must be finite; unknown IDs are ignored. Without scores the table
+  is unchanged. The pipeline, CLI and rules planner do not use these scores yet.
 - Output: `EDL`; the rules planner aligns an in- or out-point to a cut-point candidate
   when a fixed-length window fits within the usable part and the maximum shift
 - `plan/llm.py` provides deterministic prompt building and EDL parsing via
@@ -442,6 +449,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · plan: optional ranker score column in the planner shot table (plan/shot_table.py)
 - [x] Week 4 · learn: pure-Python pairwise shot ranker (learn/ranker.py)
 - [x] Week 5 · feedback: edit constraints fed into the LLM planner via cut --constraints (plan/llm.py, pipeline.py, cli.py)
 - [x] Week 3 · style: look stats in style distance (style/distance.py)
