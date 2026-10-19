@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from vlogcut import cli
+from vlogcut.llm.router import ModelRouter
 from vlogcut.pipeline import CutResult, find_footage
 from vlogcut.schemas import EDL, Clip, DurationStats, StyleProfile
 from vlogcut.validate import Violation
@@ -223,3 +224,77 @@ def test_style_end_to_end(make_edited_clip, tmp_path, capsys):
     profile = StyleProfile.model_validate_json(out.read_text(encoding="utf-8"))
     assert profile.cuts_per_min == pytest.approx(30.0, abs=15)  # 2 cuts in 4 s, +-1 cut
     assert profile.source_refs == [str(ref)]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,
+        "[",
+        "",
+        "[]",
+        "providers: {}",
+        "providers: {}\nroles: {}",
+        "providers: {}\nroles: {planner: {provider: missing, model: test}}",
+    ],
+)
+def test_llm_config_errors_fail_before_cut(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    content: str | None,
+) -> None:
+    config = tmp_path / "models.yaml"
+    if content is not None:
+        config.write_text(content, encoding="utf-8")
+    monkeypatch.setattr("vlogcut.pipeline.cut", lambda *a, **k: pytest.fail("started cut"))
+    assert cli.main(["cut", str(tmp_path), "--planner", "llm", "--config", str(config)]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "model config" in captured.err and captured.err.count("\n") == 1
+
+
+@pytest.mark.parametrize("planner", ["rules", "llm"])
+def test_cut_planner_options_and_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, planner: str
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    args = cli.build_parser().parse_args(["cut", "day"])
+    assert (args.planner, args.brief, args.config) == ("rules", None, Path("config.yaml"))
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "providers: {fake: {base_url: 'http://fake/v1'}}\n"
+        "roles: {planner: {provider: fake, model: test}}\n",
+        encoding="utf-8",
+    )
+    result = _cut_result(tmp_path, [])
+    result.planner = planner
+    result.repair_rounds = 1 if planner == "llm" else 0
+
+    def cut(*args: object, **kwargs: object) -> CutResult:
+        assert kwargs["planner"] == planner
+        if planner == "llm":
+            assert isinstance(kwargs["router"], ModelRouter)
+            assert kwargs["router"].roles["planner"].model == "test"
+            assert kwargs["brief"] == "A quiet morning"
+        else:
+            assert kwargs["router"] is None and kwargs["brief"] is None
+        return result
+
+    monkeypatch.setattr("vlogcut.pipeline.cut", cut)
+    argv = ["cut", str(tmp_path), "--no-render"]
+    if planner == "llm":
+        argv += ["--planner", "llm", "--brief", "A quiet morning"]
+    else:
+        monkeypatch.setattr(ModelRouter, "from_yaml", lambda *a: pytest.fail("read config"))
+    assert cli.main(argv) == 0
+    assert (
+        f"planner   {planner}, repair rounds: {result.repair_rounds}, fallback to rules: no\n"
+        in capsys.readouterr().out
+    )
+    if planner == "llm":
+        result.planner, result.fallback, result.repair_rounds = "rules", True, 0
+        assert cli.main(argv) == 0
+        assert (
+            "planner   rules, repair rounds: 0, fallback to rules: yes\n" in capsys.readouterr().out
+        )

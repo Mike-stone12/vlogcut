@@ -30,6 +30,12 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("-t", "--target", type=float, default=180.0, help="target length, s")
     c.add_argument("-s", "--strategy", choices=["coverage", "highlights"], default="coverage")
     c.add_argument("--style", type=Path, help="style profile JSON from `vlogcut style build`")
+    c.add_argument("--planner", choices=["rules", "llm"], default="rules")
+    c.add_argument("--brief", help="text brief for the LLM planner")
+    c.add_argument(
+        "--config", type=Path, default=Path("config.yaml"),
+        help="model router config (only read with --planner llm; default config.yaml)",
+    )  # fmt: skip
     c.add_argument("-w", "--workspace", type=Path, help="cache dir (default ./workspace/<folder>)")
     c.add_argument("-o", "--out", type=Path, help="preview path (default inside the workspace)")
     c.add_argument("--music", type=Path, help="background music file (your own)")
@@ -84,12 +90,34 @@ def _cut(args: argparse.Namespace) -> int:
         return _fail(f"music file not found: {args.music}")
     if args.style is not None and not args.style.is_file():
         return _fail(f"style profile not found: {args.style}")
+    router = None
+    if args.planner == "llm":
+        from yaml import YAMLError
+
+        from vlogcut.llm.router import ModelRouter
+
+        try:
+            router = ModelRouter.from_yaml(args.config)
+            if "planner" not in router.roles:
+                raise ValueError("missing planner role")
+        except (
+            OSError,
+            UnicodeError,
+            YAMLError,
+            ValueError,
+            TypeError,
+            KeyError,
+            AttributeError,
+        ) as exc:
+            detail = " ".join(str(exc).split())
+            return _fail(f"invalid model config {args.config}: {detail}")
     workspace = args.workspace or Path("workspace") / args.folder.resolve().name
     started = time.perf_counter()
     try:
         result = cut(
             args.folder, workspace,
             target_s=args.target, strategy=args.strategy, style=args.style, music=args.music,
+            planner=args.planner, router=router, brief=args.brief,
             music_gain_db=args.music_gain, out=args.out, render=not args.no_render,
             preview_params={"background": args.background, "subtitles": not args.no_subtitles},
             progress=lambda msg: print(msg, file=sys.stderr),
@@ -111,6 +139,10 @@ def _cut(args: argparse.Namespace) -> int:
     if result.profile is not None:
         print(f"style     {args.style.name}: {result.profile.notes}")
     print(f"cut       {len(result.edl.clips)} clips, {result.edl.total_duration_s:.1f} s")
+    print(
+        f"planner   {result.planner}, repair rounds: {result.repair_rounds}, "
+        f"fallback to rules: {'yes' if result.fallback else 'no'}"
+    )
     print(f"edl       {result.edl_path}")
     if result.repaired:
         print("repaired EDL")

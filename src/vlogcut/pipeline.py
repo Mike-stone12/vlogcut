@@ -11,10 +11,12 @@ import json
 import logging
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from vlogcut.ingest import ProbeError, make_proxy, probe_asset
+from vlogcut.llm.router import ModelRouter
 from vlogcut.schemas import EDL, MediaAsset, MusicCue, Shot, StyleProfile
 from vlogcut.validate import Violation, repair_edl, validate_edl
 
@@ -38,6 +40,9 @@ class CutResult(BaseModel):
     profile: StyleProfile | None = None  # the style the cut was paced with, if any
     violations: list[Violation] = Field(default_factory=list)
     repaired: bool = False
+    planner: Literal["rules", "llm"] = "rules"
+    fallback: bool = False
+    repair_rounds: int = 0
 
 
 def find_footage(folder: str | Path) -> list[Path]:
@@ -140,6 +145,10 @@ def cut(
     target_s: float = 180.0,
     strategy: str = "coverage",
     style: Path | None = None,
+    planner: Literal["rules", "llm"] = "rules",
+    router: ModelRouter | None = None,
+    brief: str | None = None,
+    max_repair_rounds: int = 2,
     music: Path | None = None,
     music_gain_db: float = -14.0,
     out: Path | None = None,
@@ -148,9 +157,12 @@ def cut(
     progress: Progress = log.info,
 ) -> CutResult:
     from vlogcut.plan import RoughCutParams, rough_cut
+    from vlogcut.plan.llm import PlannerError, plan_with_repair
     from vlogcut.render import PreviewParams, render_preview
     from vlogcut.style import load_profile
 
+    if planner == "llm" and router is None:
+        raise ValueError('planner="llm" requires a ModelRouter')
     workspace = Path(workspace)
     # read the profile first: a bad file should fail before minutes of analysis
     profile = load_profile(style) if style is not None else None
@@ -165,13 +177,30 @@ def cut(
     progress(
         f"plan {strategy}, target {target_s:.0f} s" + (f", style {style.name}" if style else "")
     )
-    edl = rough_cut(shots, assets, RoughCutParams(target_s=target_s, strategy=strategy), profile)
+    used_planner, fallback, repair_rounds = planner, False, 0
+    if planner == "llm":
+        try:
+            planned = plan_with_repair(
+                router, shots, target_s=target_s, profile=profile, brief=brief,
+                max_rounds=max_repair_rounds,
+            )  # fmt: skip
+        except PlannerError as exc:
+            log.warning("LLM planner failed; falling back to rules: %s", exc)
+            used_planner, fallback = "rules", True
+        else:
+            edl, repair_rounds = planned.edl, planned.rounds
+    if used_planner == "rules":
+        edl = rough_cut(
+            shots, assets, RoughCutParams(target_s=target_s, strategy=strategy), profile
+        )
     if style is not None and profile is not None:
         edl.notes += f"; style {style.name}: {profile.notes}"  # an EDL says what paced it
     if music is not None:
         edl.music = [MusicCue(track_id="music", gain_db=music_gain_db)]
     # outputs with and without a style sit side by side (the run manifest replaces this)
     name = f"{strategy}_{target_s:.0f}s" + (f"_{style.stem}" if style else "")
+    if used_planner == "llm":
+        name += "_llm"
     edl_path = workspace / "edl" / f"{name}.json"
     violations = validate_and_write(edl, shots, edl_path, target_s=target_s, profile=profile)
     edl_path.parent.mkdir(parents=True, exist_ok=True)
@@ -200,4 +229,5 @@ def cut(
     return CutResult(
         assets=assets, skipped=skipped, shots=shots, edl=edl, edl_path=edl_path,
         preview_path=preview, profile=profile, violations=violations, repaired=repaired,
+        planner=used_planner, fallback=fallback, repair_rounds=repair_rounds,
     )  # fmt: skip
