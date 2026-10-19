@@ -110,6 +110,19 @@ def test_messages_are_deterministic_and_include_filtered_table(shots: list[Shot]
     assert [shot.model_dump() for shot in shots] == before
 
 
+@pytest.mark.parametrize("planner", [plan_with_llm, plan_with_repair])
+def test_planner_forwards_ranker_scores(
+    tmp_path: Path, shots: list[Shot], valid_json: str, planner: Any
+) -> None:
+    router, client = make_router(tmp_path, valid_json)
+    scores = {"s1": 1.25, "s2": -2.5, "reject-me": 0.0}
+    planner(router, shots, target_s=10, ranker_scores=scores)
+    assert (
+        format_shot_table(shots, ranker_scores=scores)
+        in client.requests[0]["messages"][1]["content"]
+    )
+
+
 @pytest.mark.parametrize("dissolve_share", [None, 0.0, 0.25])
 def test_messages_include_profile_and_brief(
     shots: list[Shot], dissolve_share: float | None

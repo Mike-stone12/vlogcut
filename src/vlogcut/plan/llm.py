@@ -2,7 +2,7 @@
 
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
@@ -75,6 +75,7 @@ def build_planner_messages(
     profile: StyleProfile | None = None,
     brief: str | None = None,
     constraints: Sequence[str] | None = None,
+    ranker_scores: Mapping[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Build deterministic text messages; callers supply shots in chronological order."""
     system = """Pick and order clips from the shot table to make a rough cut of about
@@ -141,7 +142,7 @@ gain_db (number, default 0). No music tracks are supplied here, so leave music e
                 else []
             ),
             "Shot table (chronological order):",
-            format_shot_table(shots),
+            format_shot_table(shots, ranker_scores=ranker_scores),
         ]
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -171,11 +172,13 @@ def plan_with_llm(
     profile: StyleProfile | None = None,
     brief: str | None = None,
     constraints: Sequence[str] | None = None,
+    ranker_scores: Mapping[str, float] | None = None,
 ) -> EDL:
     """Call the planner once and parse its EDL, without semantic checks or fallback."""
     messages = build_planner_messages(
-        shots, target_s=target_s, profile=profile, brief=brief, constraints=constraints
-    )
+        shots, target_s=target_s, profile=profile, brief=brief, constraints=constraints,
+        ranker_scores=ranker_scores,
+    )  # fmt: skip
     edl = parse_planner_response(router.complete("planner", messages))
     log.info("LLM planner parsed %d clips, %.1f s", len(edl.clips), edl.total_duration_s)
     return edl
@@ -189,6 +192,7 @@ def plan_with_repair(
     profile: StyleProfile | None = None,
     brief: str | None = None,
     constraints: Sequence[str] | None = None,
+    ranker_scores: Mapping[str, float] | None = None,
     max_rounds: int = 2,
 ) -> LLMPlanResult:
     """Plan once, then retry parse/check failures for at most ``max_rounds`` rounds.
@@ -200,8 +204,9 @@ def plan_with_repair(
     if max_rounds < 0:
         raise ValueError("max_rounds must be non-negative")
     messages = build_planner_messages(
-        shots, target_s=target_s, profile=profile, brief=brief, constraints=constraints
-    )
+        shots, target_s=target_s, profile=profile, brief=brief, constraints=constraints,
+        ranker_scores=ranker_scores,
+    )  # fmt: skip
     last_edl: EDL | None = None
     violations: list[Violation] = []
     for round_index in range(max_rounds + 1):

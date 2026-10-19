@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 from pathlib import Path
 from threading import Event, Lock
 from time import sleep
@@ -12,6 +13,7 @@ from vlogcut import pipeline, plan
 from vlogcut.analyze import pauses, quality
 from vlogcut.analyze import shots as shot_module
 from vlogcut.ingest import ProbeError
+from vlogcut.learn.ranker import RankerModel, score
 from vlogcut.llm.router import ModelRouter
 from vlogcut.schemas import (
     EDL,
@@ -76,6 +78,79 @@ def _edl(shot_id: str = "s") -> EDL:
         variant_id="test", target_duration_s=1,
         clips=[Clip(shot_id=shot_id, in_s=0, out_s=1)],
     )  # fmt: skip
+
+
+@pytest.mark.parametrize("planner", ["rules", "llm"])
+def test_ranker_scores_all_shots_after_captioning_and_reaches_rules(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_analysis: None,
+    ranker_model: RankerModel,
+    planner: str,
+) -> None:
+    shots = _shots()
+    rejected = shots[0].model_copy(deep=True, update={"shot_id": "rejected"})
+    rejected.quality.rejected = True
+    shots.extend([rejected, shots[0].model_copy(update={"shot_id": "short", "end_s": 0.1})])
+    client = FakeClient(["not JSON"] * 3)
+    router = _router(tmp_path, client)
+
+    def analyze(*args: Any, **kwargs: Any) -> list[Shot]:
+        assert kwargs == {"caption": True, "router": router}
+        shots[0].interest = 5
+        return shots
+
+    monkeypatch.setattr(pipeline, "analyze", analyze)
+    original = plan.rough_cut
+    forwarded: list[dict[str, float]] = []
+
+    def rough_cut(*args: Any, **kwargs: Any) -> EDL:
+        forwarded.append(kwargs["ranker_scores"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(plan, "rough_cut", rough_cut)
+    result = pipeline.cut(
+        tmp_path, tmp_path, target_s=3, render=False, ranker=ranker_model,
+        caption=True, router=router, planner=planner,
+    )  # fmt: skip
+    assert forwarded == [{shot.shot_id: score(ranker_model, shot) for shot in shots}]
+    assert forwarded[0] == {"s": 5.0, "rejected": 3.0, "short": 3.0}
+    assert all(math.isfinite(value) for value in forwarded[0].values())
+    assert result.fallback == (planner == "llm")
+    assert all(clip.shot_id == "s" for clip in result.edl.clips)
+
+
+@pytest.mark.parametrize("explicit_none", [False, True])
+def test_no_ranker_preserves_edl_bytes(
+    tmp_path: Path, stub_analysis: None, explicit_none: bool
+) -> None:
+    assets, _ = pipeline.ingest([], tmp_path)
+    expected = plan.rough_cut(_shots(), assets, plan.RoughCutParams(target_s=3))
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(expected.model_dump_json(indent=1), encoding="utf-8")
+    result = pipeline.cut(
+        tmp_path, tmp_path, target_s=3, render=False, **({"ranker": None} if explicit_none else {})
+    )
+    assert result.edl_path.read_bytes() == baseline.read_bytes()
+
+
+def test_ranker_reaches_llm_prompt_and_none_preserves_bytes(
+    tmp_path: Path, stub_analysis: None, ranker_model: RankerModel
+) -> None:
+    prompts = []
+    for options in ({}, {"ranker": None}, {"ranker": ranker_model}):
+        client = FakeClient([_edl().model_dump_json()])
+        result = pipeline.cut(
+            tmp_path, tmp_path, target_s=1, render=False,
+            planner="llm", router=_router(tmp_path, client), **options,
+        )  # fmt: skip
+        assert result.planner == "llm" and not result.fallback
+        prompts.append(client.requests[0]["messages"])
+    assert json.dumps(prompts[0]).encode() == json.dumps(prompts[1]).encode()
+    assert prompts[0] == plan.build_planner_messages(_shots(), target_s=1)
+    assert "\trank\t" not in prompts[0][1]["content"]
+    assert "\tinterest\trank\trejected\t" in prompts[2][1]["content"]
+    assert plan.format_shot_table(_shots(), ranker_scores={"s": 3.0}) in prompts[2][1]["content"]
 
 
 @pytest.mark.parametrize("planner", ["rules", "llm"])

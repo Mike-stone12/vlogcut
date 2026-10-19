@@ -11,8 +11,19 @@ from typing import Any
 import pytest
 
 from vlogcut.ingest import ffmpeg
+from vlogcut.learn.ranker import FEATURE_NAMES, RankerModel
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture
+def ranker_model() -> RankerModel:
+    return RankerModel(
+        feature_names=list(FEATURE_NAMES),
+        mean=[0.0] * len(FEATURE_NAMES),
+        scale=[1.0] * len(FEATURE_NAMES),
+        weights=[float(name == "interest") for name in FEATURE_NAMES],
+    )
 
 
 def _have_ffmpeg() -> bool:

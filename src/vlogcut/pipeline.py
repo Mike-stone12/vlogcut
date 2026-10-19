@@ -18,6 +18,7 @@ from typing import Literal, TypeVar
 from pydantic import BaseModel, Field
 
 from vlogcut.ingest import ProbeError, make_proxy, probe_asset
+from vlogcut.learn.ranker import RankerModel, score
 from vlogcut.llm.router import ModelRouter
 from vlogcut.paths import to_workspace_relative
 from vlogcut.schemas import EDL, MediaAsset, MusicCue, Shot, StyleProfile
@@ -235,6 +236,7 @@ def cut(
     caption: bool = False,
     brief: str | None = None,
     constraints: Sequence[str] | None = None,
+    ranker: RankerModel | None = None,
     max_repair_rounds: int = 2,
     music: Path | None = None,
     music_gain_db: float = -14.0,
@@ -274,6 +276,7 @@ def cut(
         raise FileNotFoundError(f"none of the {len(files)} files in {folder} is usable footage")
     caption_options = {"caption": True, "router": router} if caption else {}
     shots = analyze(assets, workspace, progress, **worker_options, **caption_options)
+    ranker_scores = {shot.shot_id: score(ranker, shot) for shot in shots} if ranker else None
 
     progress(
         f"plan {strategy}, target {target_s:.0f} s" + (f", style {style.name}" if style else "")
@@ -283,7 +286,7 @@ def cut(
         try:
             planned = plan_with_repair(
                 router, shots, target_s=target_s, profile=profile, brief=brief,
-                max_rounds=max_repair_rounds, constraints=constraints,
+                max_rounds=max_repair_rounds, constraints=constraints, ranker_scores=ranker_scores,
             )  # fmt: skip
         except PlannerError as exc:
             log.warning("LLM planner failed; falling back to rules: %s", exc)
@@ -295,7 +298,7 @@ def cut(
             log.warning("Edit constraints are ignored by the rules planner")
         edl = rough_cut(
             shots, assets, RoughCutParams(target_s=target_s, strategy=strategy), profile,
-            cold_open=cold_open,
+            cold_open=cold_open, ranker_scores=ranker_scores,
         )  # fmt: skip
     if style is not None and profile is not None:
         edl.notes += f"; style {style.name}: {profile.notes}"  # an EDL says what paced it

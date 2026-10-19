@@ -37,6 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("-s", "--strategy", choices=["coverage", "highlights"], default="coverage")
     c.add_argument("--style", type=Path, help="style profile JSON from `vlogcut style build`")
     c.add_argument(
+        "--ranker", type=Path, metavar="MODEL_JSON",
+        help="trained ranker JSON: scores only shape selection and length; "
+        "hard filters and chronology are unchanged",
+    )  # fmt: skip
+    c.add_argument(
         "--cold-open",
         action="store_true",
         help="opt into a cold open (needs a --style profile with cold_open_clips > 0)",
@@ -133,6 +138,14 @@ def _cut(args: argparse.Namespace) -> int:
     from vlogcut.render import RenderError
     from vlogcut.style import StyleError
 
+    ranker = None
+    if args.ranker is not None:
+        from vlogcut.learn.ranker import RankerModel
+
+        try:
+            ranker = RankerModel.model_validate_json(args.ranker.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return _fail(" ".join(f"invalid ranker model {args.ranker}: {exc}".split()))
     constraints = None
     if args.constraints is not None:
         from vlogcut.feedback.classify import load_constraints
@@ -184,6 +197,7 @@ def _cut(args: argparse.Namespace) -> int:
             music_gain_db=args.music_gain, out=args.out, render=not args.no_render,
             preview_params={"background": args.background, "subtitles": not args.no_subtitles},
             progress=progress, workers=args.jobs, cold_open=args.cold_open, constraints=constraints,
+            ranker=ranker,
         )  # fmt: skip
     except FFmpegNotFoundError as exc:
         return _fail(str(exc))
