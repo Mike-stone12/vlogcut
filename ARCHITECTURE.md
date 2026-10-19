@@ -139,10 +139,11 @@ standardisation stored alongside weights in a JSON-round-trippable `RankerModel`
 Features use existing shot durations, usable ranges, quality metrics, warning and
 cut-point counts, and interest; missing optional values have explicit indicators.
 Training and scoring run locally on CPU with no new dependencies. Callers decide
-whether to exclude rejected shots. The shot table accepts optional precomputed
-ranker scores keyed by shot ID, without importing the ranker. The pipeline, CLI
-and rules planner do not use them yet; draft import and deriving shot pairs from
-feedback remain planned.
+whether to exclude rejected shots. The shot table and rules planner accept optional
+precomputed ranker scores keyed by shot ID, without importing the ranker. The rules
+planner blends 50% existing shot score with 50% within-table ranker percentile;
+ties use average rank, and single or missing scores default to 0.5. Pipeline and
+CLI wiring, draft import and deriving shot pairs from feedback remain planned.
 No CLIP embedding is used yet. No end-to-end "video → edit" model: there is no data
 for it, it is not explainable, and it would break principle 2.
 
@@ -154,7 +155,17 @@ for it, it is not explainable, and it would break principle 2.
   When supplied, a `rank` column follows interest: two decimals, `-` for missing
   scores, higher = more likely chosen, relative within this table only. Scores for
   supplied shots must be finite; unknown IDs are ignored. Without scores the table
-  is unchanged. The pipeline, CLI and rules planner do not use these scores yet.
+  is unchanged. Pipeline and CLI wiring remain planned.
+- `plan/rules.rough_cut` accepts optional precomputed `ranker_scores` with the same
+  higher-is-better convention and finite-value validation for every known shot,
+  including rejected or too-short shots; unknown IDs are ignored. Among eligible
+  candidates with scores, convert zero-based average ranks to percentiles by
+  dividing by n - 1. Ties share their average rank; a single scored shot and
+  missing scores get 0.5. Blend `0.5 * existing_score + 0.5 * percentile` for
+  selection, length assignment and cold-open ranking. The default quality score
+  already lies in [0, 1]. None or empty mappings preserve EDL bytes; hard filters,
+  chronology and pacing rules are unchanged. No ranker import is needed, and
+  pipeline and CLI wiring remain planned.
 - Output: `EDL`; the rules planner aligns an in- or out-point to a cut-point candidate
   when a fixed-length window fits within the usable part and the maximum shift
 - `plan/llm.py` provides deterministic prompt building and EDL parsing via
@@ -449,6 +460,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · plan: rules planner blends optional ranker scores (plan/rules.py)
 - [x] Week 4 · plan: optional ranker score column in the planner shot table (plan/shot_table.py)
 - [x] Week 4 · learn: pure-Python pairwise shot ranker (learn/ranker.py)
 - [x] Week 5 · feedback: edit constraints fed into the LLM planner via cut --constraints (plan/llm.py, pipeline.py, cli.py)
@@ -533,6 +545,17 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: rules planner accepts precomputed ranker scores without importing
+  `vlogcut.learn`. Normalize only scored eligible candidates to [0, 1] using
+  zero-based average ranks / (n - 1), averaging ties; a single score and missing
+  scores default to 0.5. Blend 50/50 with the existing per-shot score, which
+  `score_shot` already clamps to [0, 1], for selection, length assignment ties,
+  duplicate replacement and cold-open ranking. Custom scorers should use [0, 1]
+  when blending. Validate finite scores for all known shots before filtering;
+  ignore unknown IDs. None or empty mappings preserve EDL JSON bytes. Candidate
+  eligibility, usable ranges, chronology and pacing rules are unchanged.
+  Pipeline/CLI wiring, draft import and feedback-derived shot pairs remain planned.
 
 - 2026-10-19: first shot ranker uses linear pairwise logistic training in pure
   Python with no new dependencies. Population means and scales are stored in

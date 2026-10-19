@@ -9,6 +9,7 @@ from vlogcut.plan.rules import (
     DEFAULT_PACING,
     _Candidate,
     _lengths,
+    _ranker_percentiles,
     apply_cold_open,
     apply_intro_pace,
     apply_montage,
@@ -67,6 +68,141 @@ def _by_id(shots: list[Shot]) -> dict[str, Shot]:
 
 
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "scores,expected",
+    [
+        ({}, [0.5] * 5),
+        ({"b": 99}, [0.5] * 5),
+        ({"a": 10, "b": 10, "c": 30, "d": 50}, [1 / 6, 1 / 6, 2 / 3, 1, 0.5]),
+        ({"a": 8, "b": 8, "c": 8}, [0.5] * 5),
+    ],
+)
+def test_ranker_percentiles_ties_single_and_missing(
+    scores: dict[str, float], expected: list[float]
+) -> None:
+    before = scores.copy()
+    result = _ranker_percentiles(list("abcde"), {**scores, "unknown": float("nan")})
+    assert list(result.values()) == pytest.approx(expected)
+    assert scores == before
+
+
+@pytest.mark.parametrize("strategy", ["coverage", "highlights"])
+@pytest.mark.parametrize("cold_open", [False, True])
+def test_absent_ranker_scores_preserve_edl_bytes(strategy: str, cold_open: bool) -> None:
+    shots, assets = _day()
+    params = RoughCutParams(target_s=60, strategy=strategy)
+    profile = StyleProfile(shot_duration_s=DEFAULT_PACING, cuts_per_min=20, cold_open_clips=1)
+    baseline = rough_cut(shots, assets, params, profile, cold_open=cold_open)
+    for scores in (None, {}):
+        actual = rough_cut(
+            shots, assets, params, profile, cold_open=cold_open, ranker_scores=scores
+        )
+        assert actual.model_dump_json().encode() == baseline.model_dump_json().encode()
+
+
+@pytest.mark.parametrize("strategy", ["coverage", "highlights"])
+def test_ranker_scores_change_selection(strategy: str) -> None:
+    shots = [_shot("a", 0), _shot("a", 1, sharpness=0)]
+    assets = [_asset("a", 0)]
+    params = RoughCutParams(target_s=3, strategy=strategy)
+    baseline = rough_cut(shots, assets, params)
+    assert [c.shot_id for c in baseline.clips] == [shots[0].shot_id]
+    scores = {shots[0].shot_id: -1e300, shots[1].shot_id: 1e300}
+    ranked = rough_cut(shots, assets, params, ranker_scores=scores)
+    assert [c.shot_id for c in ranked.clips] == [shots[1].shot_id]
+    assert validate_edl(ranked, shots, target_s=3) == []
+
+
+def test_ranker_scores_break_length_assignment_ties() -> None:
+    shots = [_shot("a", 0), _shot("a", 1, sharpness=0)]
+    assets = [_asset("a", 0)]
+    params = RoughCutParams(target_s=6)
+    baseline = rough_cut(shots, assets, params)
+    ranked = rough_cut(
+        shots, assets, params, ranker_scores={shots[0].shot_id: -100, shots[1].shot_id: 100}
+    )
+    assert [c.shot_id for c in ranked.clips] == [c.shot_id for c in baseline.clips]
+    assert baseline.clips[0].timeline_duration_s > baseline.clips[1].timeline_duration_s
+    assert ranked.clips[0].timeline_duration_s < ranked.clips[1].timeline_duration_s
+
+
+def test_unknown_ranker_ids_are_ignored() -> None:
+    shots, assets = _day()
+    params = RoughCutParams(target_s=30)
+    unknown = {"unknown": float("nan"), "also_unknown": float("inf")}
+    for scores in ({}, {shots[0].shot_id: -10, shots[-1].shot_id: 10}):
+        baseline = rough_cut(shots, assets, params, ranker_scores=scores)
+        actual = rough_cut(shots, assets, params, ranker_scores={**scores, **unknown})
+        assert actual.model_dump_json() == baseline.model_dump_json()
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+@pytest.mark.parametrize("status", ["eligible", "rejected", "too_short"])
+def test_known_ranker_scores_must_be_finite(value: float, status: str) -> None:
+    shot = _shot("a", 0, dur=0.5 if status == "too_short" else 6)
+    shot.quality.rejected = status == "rejected"
+    with pytest.raises(ValueError, match=shot.shot_id):
+        rough_cut([shot], [_asset("a", 0)], ranker_scores={shot.shot_id: value})
+
+
+def test_ranker_blend_uses_only_eligible_candidates_and_defaults_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shots = [_shot("a", i) for i in range(5)]
+    shots[3].quality.rejected = True
+    shots[4].quality.usable_range = (0, 0.5)
+    scores = {shots[i].shot_id: value for i, value in enumerate([-10, 10, 0, 1000, -1000])}
+    del scores[shots[2].shot_id]
+    captured: list[float] = []
+
+    def capture_lengths(
+        targets: list[float], caps: list[float], scores: list[float], talking: list[bool]
+    ) -> list[float]:
+        captured.extend(scores)
+        return assign_lengths(targets, caps, scores, talking)
+
+    monkeypatch.setattr("vlogcut.plan.rules.assign_lengths", capture_lengths)
+    edl = rough_cut(shots, [_asset("a", 0)], RoughCutParams(target_s=9), ranker_scores=scores)
+    assert [c.shot_id for c in edl.clips] == [s.shot_id for s in shots[:3]]
+    assert captured == pytest.approx([0.5 * score_shot(shots[0]) + 0.5 * p for p in (0, 1, 0.5)])
+    assert validate_edl(edl, shots, target_s=9) == []
+
+
+@pytest.mark.parametrize("strategy", ["coverage", "highlights"])
+@pytest.mark.parametrize("cold_open", [False, True])
+def test_ranker_preserves_filters_order_and_cut_point_alignment(
+    strategy: str, cold_open: bool
+) -> None:
+    shots = [_shot("a", i) for i in range(8)]
+    shots[0].dup_group = shots[1].dup_group = "duplicate"
+    shots[6].quality.rejected = True
+    for shot in shots:
+        shot.quality.usable_range = (1, 5)
+        shot.cut_points = [CutPoint(time_s=shot.start_s + 1.25, kind="pause")]
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=2, median=2, p90=2),
+        cuts_per_min=30,
+        cold_open_clips=int(cold_open),
+    )
+    scores = {
+        s.shot_id: value for s, value in zip(shots, [8, 7, 1, 6, 0, 5, 1000, -1], strict=True)
+    }
+    edl = rough_cut(
+        shots,
+        [_asset("a", 0)],
+        RoughCutParams(target_s=8, strategy=strategy),
+        profile,
+        ranker_scores=scores,
+        cold_open=cold_open,
+    )
+    ids = [c.shot_id for c in edl.clips]
+    body = ids[1:] if cold_open else ids
+    assert body == sorted(body)
+    assert shots[6].shot_id not in ids
+    assert all(c.in_s == 1.25 and c.out_s == 3.25 for c in edl.clips)
+    assert validate_edl(edl, shots, profile, target_s=8) == []
 
 
 @pytest.mark.parametrize("strategy", ["coverage", "highlights"])
