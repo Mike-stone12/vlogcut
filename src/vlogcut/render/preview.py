@@ -300,17 +300,36 @@ def srt(segments: Sequence[Segment]) -> str:
     return "\n".join(lines)
 
 
+def music_cue_filter(cue: MusicCue, total_s: float, fade_out_s: float = 0.0) -> str:
+    """Audio fragment without labels; zero cue fade-out retains the preview fallback.
+
+    Explicit fades are linear and capped independently to the available cue span;
+    they may overlap when the timeline truncates the cue. FFmpeg's default afade
+    curve is linear (tri), preserving the legacy fallback's exact filter bytes.
+    """
+    end = min(cue.end_s, total_s) if cue.end_s is not None else total_s
+    available = max(0.0, end - cue.start_s)
+    ms = round(cue.start_s * 1000)
+    chain = f"aresample={AUDIO_RATE},aformat=channel_layouts=stereo"
+    chain += f",volume={cue.gain_db}dB,adelay={ms}|{ms},atrim=0:{end:.6f}"
+    fade_in = min(cue.fade_in_s, available)
+    if fade_in:
+        chain += f",afade=t=in:st={cue.start_s:.6f}:d={fade_in:.6f}:curve=tri"
+    if cue.fade_out_s:
+        fade_out = min(cue.fade_out_s, available)
+        if fade_out:
+            chain += f",afade=t=out:st={end - fade_out:.6f}:d={fade_out:.6f}:curve=tri"
+    elif fade_out_s:
+        fade_st = max(0.0, end - fade_out_s)
+        chain += f",afade=t=out:st={fade_st:.6f}:d={min(fade_out_s, end):.3f}"
+    return chain
+
+
 def music_filter(cues: Sequence[MusicCue], total_s: float, fade_out_s: float) -> str:
     """filter_complex mixing music inputs 1..n under the programme audio [0:a]."""
     chains, labels = [], ["[0:a]"]
     for i, cue in enumerate(cues, 1):
-        ms = round(cue.start_s * 1000)
-        fade_st = max(0.0, total_s - fade_out_s)
-        chain = f"[{i}:a]aresample={AUDIO_RATE},aformat=channel_layouts=stereo"
-        chain += f",volume={cue.gain_db}dB,adelay={ms}|{ms},atrim=0:{total_s:.6f}"
-        if fade_out_s:
-            chain += f",afade=t=out:st={fade_st:.6f}:d={min(fade_out_s, total_s):.3f}"
-        chains.append(f"{chain}[m{i}]")
+        chains.append(f"[{i}:a]{music_cue_filter(cue, total_s, fade_out_s)}[m{i}]")
         labels.append(f"[m{i}]")
     mix = f"{''.join(labels)}amix=inputs={len(labels)}:duration=first:normalize=0[a]"
     return ";".join([*chains, mix])

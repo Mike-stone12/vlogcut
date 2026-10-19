@@ -10,6 +10,7 @@ from vlogcut.schemas import (
     DurationStats,
     Feedback,
     LookStats,
+    MusicCue,
     PreferencePair,
     QualityFlags,
     Run,
@@ -155,6 +156,66 @@ def test_clip_audio_rejects_invalid_modes(mode: object):
 def test_edl_requires_clips():
     with pytest.raises(ValidationError):
         EDL(variant_id="v", target_duration_s=10, clips=[])
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_music_defaults_preserve_old_edl_json_bytes(explicit: bool) -> None:
+    payload = (
+        b'{"variant_id":"v","target_duration_s":4.0,"clips":['
+        b'{"shot_id":"s","in_s":0.0,"out_s":4.0,"speed":1.0,'
+        b'"transition_in":{"kind":"cut","duration_s":0.0},"audio":"keep",'
+        b'"subtitle":null,"reason":""}],"music":['
+        b'{"track_id":"bgm","start_s":1.0,"gain_db":-6.0}],"notes":""}'
+    )
+    edl = EDL.model_validate_json(payload)
+    cue = edl.music[0]
+    assert cue.end_s is None
+    assert cue.fade_in_s == cue.fade_out_s == 0.0
+    if explicit:
+        edl.music = [MusicCue(
+            track_id="bgm", start_s=1, gain_db=-6,
+            end_s=None, fade_in_s=0, fade_out_s=0,
+        )]  # fmt: skip
+    assert edl.model_dump_json().encode() == payload
+    assert edl.model_dump()["music"] == [{"track_id": "bgm", "start_s": 1.0, "gain_db": -6.0}]
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"end_s": 4.0},
+        {"fade_in_s": 8.0},
+        {"fade_out_s": 8.0},
+        {"end_s": 4.0, "fade_in_s": 1.0, "fade_out_s": 2.0},
+    ],
+)
+def test_music_non_defaults_round_trip(fields: dict[str, float]) -> None:
+    cue = MusicCue(track_id="bgm", start_s=1, **fields)
+    edl = EDL(
+        variant_id="v", target_duration_s=4,
+        clips=[Clip(shot_id="s", in_s=0, out_s=4)], music=[cue],
+    )  # fmt: skip
+    assert EDL.model_validate_json(edl.model_dump_json()) == edl
+    assert cue.model_dump() == {"track_id": "bgm", "start_s": 1.0, "gain_db": 0.0, **fields}
+
+
+@pytest.mark.parametrize("field", ["fade_in_s", "fade_out_s", "end_s"])
+@pytest.mark.parametrize("value", [-1.0, float("nan"), float("inf"), -float("inf")])
+def test_music_rejects_invalid_timing(field: str, value: float) -> None:
+    with pytest.raises(ValidationError):
+        MusicCue.model_validate({"track_id": "bgm", "start_s": 1, field: value})
+
+
+@pytest.mark.parametrize("end", [0.0, 1.0])
+def test_music_end_must_follow_start(end: float) -> None:
+    with pytest.raises(ValidationError, match="end_s must be > start_s"):
+        MusicCue(track_id="bgm", start_s=1, end_s=end)
+
+
+@pytest.mark.parametrize("fade_in,fade_out", [(3.1, 0), (0, 3.1), (1.5, 1.6)])
+def test_music_fades_must_fit_explicit_duration(fade_in: float, fade_out: float) -> None:
+    with pytest.raises(ValidationError, match="fades must fit"):
+        MusicCue(track_id="bgm", start_s=1, end_s=4, fade_in_s=fade_in, fade_out_s=fade_out)
 
 
 def test_old_edl_json_defaults_to_hard_cuts():

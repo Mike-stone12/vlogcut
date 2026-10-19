@@ -228,7 +228,9 @@ for it, it is not explainable, and it would break principle 2.
   Music starts at timeline 0; without music there is no snapping and EDL bytes are
   unchanged. No detected beats logs a warning and leaves timing unchanged; missing
   music files fail before planning and missing analysis dependencies raise ImportError.
-  `MusicTrack`, audio fades and subtitle timing from ASR remain planned.
+  Optional music cue ends and linear fades are applied deterministically during
+  preview mixing; pipeline-created cues keep defaults. `MusicTrack` and subtitle
+  timing from ASR remain planned.
 - Hard checks (code): shot ids exist; in/out inside shot bounds; no rejected shots;
   total duration within ±10 % of target; clip durations within the profile range
   (with tolerance); no back-to-back clips from the same `dup_group`; chronological
@@ -256,7 +258,12 @@ for it, it is not explainable, and it would break principle 2.
   linear audio crossfades; debug subtitle track with source + reason per clip.
   Per-clip camera audio: keep at normal level, mute to silence, or duck by a fixed
   render gain (default -12 dB), applied to each source before dissolve crossfades.
-  Music remains audible independently of clip audio modes.
+  Music remains audible independently of clip audio modes. Each cue can end early
+  and fade linearly in at its start or out at its effective end, capped to the
+  timeline end. Explicit fades are shortened to the available cue span if needed;
+  they may overlap after timeline truncation. A positive cue fade-out overrides
+  `PreviewParams.music_fade_out_s`; zero keeps that existing fallback. Default cues
+  preserve the exact music filter graph and command.
 - Interchange: an OpenTimelineIO timeline is the canonical export; JianYing and FCPXML
   are exporters from it, so a change in one app's format never reaches the planner
 - JianYing draft: `pyJianYingDraft` (generation only; final export happens in the
@@ -428,6 +435,17 @@ by silence; music still plays), or `duck` (camera audio attenuated by a fixed ga
 to sit under music). It defaults to `keep`, so old EDL JSON without the field still
 loads with the same audio behaviour.
 
+`MusicCue.end_s: float | None = None` is an optional absolute timeline stop time;
+when set, it must be finite and strictly greater than `start_s`. `None` plays to
+the timeline end. `fade_in_s: float = 0.0` and `fade_out_s: float = 0.0` are finite,
+non-negative linear fade durations. When `end_s` is set, their sum must not exceed
+`end_s - start_s`. Preview mixing caps the end to the timeline duration and clamps
+explicit fades to the remaining cue span. A zero cue fade-out retains the preview's
+global fade-out fallback. Each new field is omitted from serialization at its
+default value, including explicitly supplied defaults: old EDL JSON loads and
+default-cue EDL bytes remain identical; non-default values round-trip. Pipeline
+and CLI music creation still use defaults, with no new flags or ducking parameters.
+
 `Shot.kind: Literal["talking", "broll"] | None = None` makes the existing planner
 kind explicit. `None` means not measured, distinct from either kind; old shot JSON
 without the field still loads with `None`. The pure `analyze/kind.classify_kind`
@@ -467,7 +485,7 @@ Planned additions (remaining fields land with the module that needs them):
 
 | Field / model | Why |
 |---|---|
-| `MusicCue.end_s`, ducking params | music mixing needs an end and a level under speech |
+| `MusicCue` ducking params | music mixing needs a level under speech |
 | `StyleProfile.structure` | exists with `montage_share`, `intro_pace_ratio` and EDL-derived `kind_alternation`; reference alternation, intro length and cold-open measurement remain planned |
 | `Run` manifest (inputs fingerprint → outputs) | exists with `RunInputs`; file names are unchanged and variant IDs remain EDL stems |
 
@@ -636,6 +654,17 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: music cue timing — **schema change**: optional finite `end_s` must
+  follow `start_s`; finite non-negative `fade_in_s` and `fade_out_s` must fit their
+  sum within an explicitly bounded cue. Omit each new default field via a wrap
+  serializer to preserve old EDL bytes. The pure `render/preview.music_cue_filter`
+  builds timeline-capped trims and linear fades without FFmpeg or model calls.
+  Positive cue fade-out overrides the existing preview-wide fade-out; zero retains
+  that fallback, keeping default graphs and commands identical. Explicit fades
+  clamp independently to the remaining cue span and can overlap after truncation;
+  cues starting at or beyond the timeline end add no audible music. Pipeline/CLI,
+  beat snapping, validation checks and prompts are unchanged; ducking stays planned.
 
 - 2026-10-19: rules planner kind alternation — a pure post-selection pass runs
   only for measured `structure.kind_alternation`, including 0.0. Reuse

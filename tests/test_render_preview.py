@@ -14,6 +14,7 @@ from vlogcut.render import PreviewParams, RenderError, render_preview
 from vlogcut.render.preview import (
     atempo_chain,
     canvas_size,
+    music_cue_filter,
     music_filter,
     resolve,
     segment_args,
@@ -189,6 +190,65 @@ def test_music_filter_mixes_under_programme_audio():
     assert "volume=-12.0dB" in fc and "adelay=1500|1500" in fc
     assert "afade=t=out:st=18.000000" in fc
     assert fc.endswith("[0:a][m1]amix=inputs=2:duration=first:normalize=0[a]")
+
+
+@pytest.mark.parametrize(
+    "fallback,suffix",
+    [(0, ""), (2, ",afade=t=out:st=18.000000:d=2.000"),
+     (30, ",afade=t=out:st=0.000000:d=20.000")],
+)  # fmt: skip
+def test_music_default_fragment_and_graph_match_legacy(fallback: float, suffix: str) -> None:
+    cue = MusicCue(track_id="bgm", start_s=1.5, gain_db=-12)
+    fragment = (
+        "aresample=48000,aformat=channel_layouts=stereo,volume=-12.0dB,"
+        "adelay=1500|1500,atrim=0:20.000000" + suffix
+    )
+    assert music_cue_filter(cue, 20, fallback) == fragment
+    assert music_filter([cue], 20, fallback) == (
+        f"[1:a]{fragment}[m1];[0:a][m1]amix=inputs=2:duration=first:normalize=0[a]"
+    )
+
+
+@pytest.mark.parametrize("end,effective", [(8.0, 8.0), (None, 10.0), (20.0, 10.0)])
+def test_music_cue_trim_and_linear_fades(end: float | None, effective: float) -> None:
+    cue = MusicCue(track_id="bgm", start_s=2, end_s=end, fade_in_s=1, fade_out_s=2)
+    assert music_cue_filter(cue, 10, 5) == (
+        "aresample=48000,aformat=channel_layouts=stereo,volume=0.0dB,adelay=2000|2000,"
+        f"atrim=0:{effective:.6f},afade=t=in:st=2.000000:d=1.000000:curve=tri,"
+        f"afade=t=out:st={effective - 2:.6f}:d=2.000000:curve=tri"
+    )
+
+
+def test_music_end_without_explicit_fades() -> None:
+    cue = MusicCue(track_id="bgm", start_s=2, end_s=5)
+    assert music_cue_filter(cue, 10).endswith("adelay=2000|2000,atrim=0:5.000000")
+    assert music_cue_filter(cue, 10, 2).endswith("atrim=0:5.000000,afade=t=out:st=3.000000:d=2.000")
+
+
+@pytest.mark.parametrize("end", [None, 30.0])
+def test_music_fades_clamped_to_remaining_timeline(end: float | None) -> None:
+    cue = MusicCue(track_id="bgm", start_s=8, end_s=end, fade_in_s=5, fade_out_s=6)
+    assert music_cue_filter(cue, 10).endswith(
+        "atrim=0:10.000000,afade=t=in:st=8.000000:d=2.000000:curve=tri,"
+        "afade=t=out:st=8.000000:d=2.000000:curve=tri"
+    )
+
+
+@pytest.mark.parametrize("start", [10.0, 12.0])
+def test_music_start_at_or_after_timeline_end(start: float) -> None:
+    cue = MusicCue(track_id="bgm", start_s=start, fade_in_s=1, fade_out_s=1)
+    fragment = music_cue_filter(cue, 10)
+    assert fragment.endswith("atrim=0:10.000000")
+    assert "afade" not in fragment
+
+
+def test_music_multiple_cues_have_independent_timing() -> None:
+    cues = [MusicCue(track_id="a", end_s=4, fade_out_s=1),
+            MusicCue(track_id="b", start_s=6, fade_in_s=1)]  # fmt: skip
+    graph = music_filter(cues, 10, 0)
+    assert "atrim=0:4.000000,afade=t=out:st=3.000000:d=1.000000:curve=tri[m1]" in graph
+    assert "adelay=6000|6000,atrim=0:10.000000,afade=t=in:st=6.000000" in graph
+    assert graph.endswith("[0:a][m1][m2]amix=inputs=3:duration=first:normalize=0[a]")
 
 
 # ---------------------------------------------------------------------------
@@ -473,3 +533,27 @@ def test_render_with_music_and_missing_track(make_clip, tmp_path, shot_id, mode)
     assert _rms_db(out, 0.5, 1.0) > -35  # music under a silent clip
     with pytest.raises(RenderError, match="bgm"):
         render_preview(edl, shots, assets, ws, tmp_path / "x.mp4", music={})
+
+
+@pytest.mark.ffmpeg
+def test_render_music_end_and_fades(make_clip: Callable[..., Path], tmp_path: Path) -> None:
+    path = make_clip(duration=4, size="160x90")
+    asset = probe_asset(path).model_copy(update={"proxy_path": str(path)})
+    shot = Shot(shot_id="s", asset_id=asset.asset_id, start_s=0, end_s=4, quality=Q)
+    edl = _edl(
+        Clip(shot_id="s", in_s=0, out_s=4, audio="mute"),
+        music=[MusicCue(track_id="bgm", start_s=0.5, end_s=3.5, fade_in_s=1, fade_out_s=1)],
+    )
+    out = render_preview(
+        edl, [shot], [asset], tmp_path, tmp_path / "fades.mp4", music={"bgm": path},
+        params=PreviewParams(short_side=90, subtitles=False),
+    )  # fmt: skip
+    assert out.is_file()
+    streams = _probe(out)
+    assert float(streams["video"]["duration"]) == pytest.approx(4, abs=1 / 30)
+    assert float(streams["audio"]["duration"]) == pytest.approx(4, abs=0.05)
+    middle = _rms_db(out, 1.8, 0.2)
+    assert middle > -35
+    assert _rms_db(out, 0.55, 0.15) < middle - 10
+    assert _rms_db(out, 3.25, 0.15) < middle - 10
+    assert _rms_db(out, 3.7, 0.2) < -60
