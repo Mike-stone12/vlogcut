@@ -107,7 +107,8 @@ flags are skipped: references are finished edits), then aggregate:
   `music_bpm` is 60 / median of pooled positive inter-beat intervals from each
   reference's sorted beats, without bridging references. Disabled detection in any
   reference or no intervals leaves BPM unmeasured. Style show displays measured BPM;
-  style distance, `style diff`, both planners and validation ignore it for now.
+  style distance and `style diff` compare measured BPM in octaves. Both planners
+  and validation still ignore it.
   Chosen-music beat snapping is wired as opt-in via `pipeline.cut(music=...)`.
   The profile energy curve remains planned
 - Structure ("grammar"): montage bursts are now measured as the share of shots in
@@ -392,8 +393,12 @@ for any reference, no pooled intervals, and EDL-derived profiles leave it `None`
 (not measured). Old profile JSON without the field loads with `None`; unmeasured
 values are omitted from serialization using the same wrap-serializer convention as
 `StructureStats.kind_alternation`, preserving existing profile JSON bytes. Measured
-values round-trip and appear in `style show` with one decimal place. Style distance,
-`style diff`, both planners and validation ignore `music_bpm` for now.
+values round-trip and appear in `style show` with one decimal place. Style distance
+uses `|log2(a / b)|` when both profiles measure BPM, with equal weight in the total;
+`style diff` displays one-decimal BPM values and their octave delta. Both planners
+and validation still ignore `music_bpm`. A missing BPM skips this dimension; a
+one-sided measurement is listed in `unmeasured`, while both sides `None` preserve
+the previous distance and diff output exactly.
 
 `StyleProfile.speech_ratio` is measured by `profile_from_edl(..., shots=...)`:
 map each clip's shot ID through `analyze/kind.classify_kind`, then divide the total
@@ -641,6 +646,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 3 · style: music BPM in style distance and diff (`style/distance.py`)
 - [x] Week 3 · style: talking/b-roll alternation measured for EDL-derived profiles (schemas.py, style/)
 - [x] Week 3 · analyze: Shot.kind talking / broll from the existing speech signal (schemas.py, analyze/kind.py)
 - [x] Week 4 · learn: shot pairs derived from variant preference pairs (learn/feedback_pairs.py)
@@ -713,8 +719,9 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   look from the references, and planners do not match appearance.
 - Style distance (`style/distance.py`): per dimension |log2(a / b)| for the positive
   pacing quantities (shot-duration p10 / median / p90, cuts per minute, and
-  `intro_pace` from `structure.intro_pace_ratio`), so the unit is
-  octaves (1.0 = twice as fast or slow); absolute difference for the ratio dimensions in
+  `intro_pace` from `structure.intro_pace_ratio`) and positive tempo (`music_bpm`),
+  so the unit is octaves (1.0 = twice as fast or slow). Tempo detections at double
+  or half speed therefore differ by 1.0 octave. Absolute difference for the ratio dimensions in
   [0, 1]: `beat_aligned_ratio`, `speech_ratio`, `dissolve` (`transitions.dissolve`),
   `montage_share` (`structure.montage_share`), `kind_alternation`
   (`structure.kind_alternation`), and look `brightness` and `saturation`.
@@ -722,15 +729,25 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   A dimension unmeasured on either side is skipped and reported; if either look is
   `None`, all three look dimensions are skipped. Total is the mean over measured
   dimensions with equal weights until the eval set says otherwise.
+  For backward compatibility, `music_bpm` is omitted entirely when both sides are
+  `None`; when only one side is `None`, it is skipped and listed in `unmeasured`.
   `vlogcut style diff a.json b.json` prints it.
 - ~10 footage sets, each with reference videos
-- Metrics: style distance (shot-duration distribution distance, beat-alignment gap,
+- Metrics: style distance (shot-duration distribution distance, tempo, beat-alignment gap,
   structure / transition-mix distance), constraint violations, repair rounds, cost and
   latency per video, blind human preference
 - Baseline comparison: rules + ranker vs. LLM planner on the same sets
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: music tempo distance uses `|log2(a / b)|` with equal weight when
+  both profiles measure `music_bpm`. Double/half-speed tempo octave errors read as
+  1.0. `None` is skipped; one-sided BPM is listed in `unmeasured`. When both sides
+  are `None`, preserve the previous distance and diff output exactly, prioritizing
+  backward compatibility over listing every missing dimension. Style diff shows
+  one-decimal BPM values and the octave delta. Both planners and validation still
+  ignore BPM; measurement, schemas and style show are unchanged.
 
 - 2026-10-19: reference music tempo — **schema change**: optional finite, positive
   `StyleProfile.music_bpm` measures 60 / median of pooled positive intervals within
@@ -741,8 +758,9 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   enabled beats parameter are cache misses, and parameter changes invalidate caches.
   No detector change or new dependency. Omit unmeasured BPM from serialization to
   preserve old JSON bytes; display measured BPM with one decimal place in style show.
-  Style distance, `style diff`, both planners and validation ignore `music_bpm` for
-  now. Energy curves and chosen-music analysis are outside this change.
+  Style distance and `style diff` support are described above; both planners and
+  validation still ignore `music_bpm`. Energy curves and chosen-music analysis
+  are outside this change.
 
 - 2026-10-19: ranker training CLI — `ranker train` names the saved artifact and
   mirrors `style build` as a separate preparation step for `cut --ranker`.

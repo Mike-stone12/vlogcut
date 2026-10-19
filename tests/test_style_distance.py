@@ -65,6 +65,65 @@ def test_distance_is_zero_for_identical_and_one_octave_for_double_speed():
     ]
 
 
+@pytest.mark.parametrize(("a_bpm", "b_bpm", "octaves"), [(120, 60, 1), (60, 120, 1), (120, 120, 0)])
+@pytest.mark.parametrize("beat_ratio", [None, 0.5])
+def test_music_bpm_distance_and_diff_row(
+    a_bpm: float, b_bpm: float, octaves: float, beat_ratio: float | None
+) -> None:
+    a = _profile(1, 2, 4, 20, music_bpm=a_bpm, beat_aligned_ratio=beat_ratio)
+    b = _profile(1, 2, 4, 20, music_bpm=b_bpm, beat_aligned_ratio=beat_ratio)
+    d = profile_distance(a, b)
+    assert d.per_dim["music_bpm"] == octaves
+    assert "music_bpm" not in d.unmeasured
+    assert d.total == pytest.approx(octaves / (5 if beat_ratio is None else 6))
+    assert profile_distance(b, a) == d
+    text = format_diff("a", a, "b", b, d)
+    row = next(line for line in text.splitlines() if line.startswith("music_bpm"))
+    assert row.split() == ["music_bpm", f"{a_bpm:.1f}", f"{b_bpm:.1f}", f"{octaves:.2f}"]
+    if beat_ratio is not None:
+        assert "octaves (pacing, tempo) and ratio points, mixed" in text
+
+
+def test_music_bpm_skips_missing_on_either_side() -> None:
+    a = _profile(1, 2, 4, 20, beat_aligned_ratio=0.8)
+    b = _profile(0.5, 1, 2, 40, beat_aligned_ratio=0.3)
+    baseline = profile_distance(a, b)
+    a.music_bpm = 120
+    for left, right in [(a, b), (b, a)]:
+        d = profile_distance(left, right)
+        assert d.total == baseline.total
+        assert d.per_dim == baseline.per_dim
+        assert d.unmeasured == ["intro_pace", "music_bpm", *baseline.unmeasured[1:]]
+        lines = format_diff("a", left, "b", right, d).splitlines()
+        assert not any(line.startswith("music_bpm") for line in lines)
+        assert "music_bpm" in lines[-1]
+
+
+def test_music_bpm_absent_on_both_sides_preserves_distance_and_diff() -> None:
+    a = _profile(1, 2, 4, 20)
+    b = _profile(0.5, 1, 2, 40)
+    d = profile_distance(a, b)
+    # Exact distance and text before music_bpm became a distance dimension.
+    assert d.model_dump() == {
+        "total": 1.0,
+        "per_dim": {"p10": 1.0, "median": 1.0, "p90": 1.0, "cuts_per_min": 1.0},
+        "unmeasured": [
+            "intro_pace", "beat_aligned_ratio", "speech_ratio", "dissolve", "montage_share",
+            "kind_alternation", "brightness", "saturation", "warmth",
+        ],
+    }  # fmt: skip
+    assert format_diff("a", a, "b", b, d) == (
+        "                      a          b     delta\n"
+        "p10 shot s         1.00       0.50      1.00\n"
+        "median shot s      2.00       1.00      1.00\n"
+        "p90 shot s         4.00       2.00      1.00\n"
+        "cuts/min          20.00      40.00      1.00\n"
+        "distance      1.00 octaves; mean over 4 dims\n"
+        "not measured on both sides: intro_pace, beat_aligned_ratio, speech_ratio, "
+        "dissolve, montage_share, kind_alternation, brightness, saturation, warmth"
+    )
+
+
 def test_ratio_dims_count_only_when_measured_on_both_sides():
     a = _profile(1.0, 2.0, 4.0, 20.0, beat_aligned_ratio=0.8, speech_ratio=0.5)
     b = _profile(1.0, 2.0, 4.0, 20.0, beat_aligned_ratio=0.3)
@@ -197,6 +256,11 @@ def test_profile_from_edl_uses_timeline_durations():
     assert p.source_refs == ["edl"]
     assert p.look is None
     assert p.music_bpm is None
+    reference = p.model_copy(update={"music_bpm": 120})
+    distance = profile_distance(reference, p)
+    assert "music_bpm" in distance.unmeasured
+    assert distance.per_dim == profile_distance(p, p).per_dim
+    assert distance.total == 0
     assert p.transitions == TransitionMix(hard_cut=1, dissolve=0)
     sped_up = profile_from_edl(_edl([1.0, 2.0, 1.0], speed=2.0))  # same timeline, 2x source spans
     assert sped_up.shot_duration_s == p.shot_duration_s

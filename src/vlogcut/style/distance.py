@@ -1,6 +1,7 @@
 """Distance between style profiles, and the profile a planned cut would measure as.
 
-Pacing dimensions (shot-duration p10 / median / p90, cuts per minute, intro/body) are positive ratio
+Pacing dimensions (shot-duration p10 / median / p90, cuts per minute, intro/body) and
+music tempo are positive ratio
 quantities: a 1 s shot next to a 2 s one is as different as 4 s next to 8 s. Each is
 compared as |log2(a / b)|, so the unit is octaves and 1.0 means twice as fast or twice as
 slow. Ratio dimensions in [0, 1] (`beat_aligned_ratio`, `speech_ratio`, `dissolve`,
@@ -8,7 +9,8 @@ slow. Ratio dimensions in [0, 1] (`beat_aligned_ratio`, `speech_ratio`, `dissolv
 Look warmth in [-1, 1] uses half the absolute difference to normalize to [0, 1].
 A dimension that either side has not
 measured (`None`) is skipped and listed
-in `StyleDistance.unmeasured`. Dimensions are equally weighted until the eval set says
+in `StyleDistance.unmeasured`. For compatibility, BPM absent on both sides is omitted
+entirely. Dimensions are equally weighted until the eval set says
 otherwise. Pure functions, no numpy.
 """
 
@@ -24,7 +26,8 @@ from vlogcut.analyze.kind import classify_kind
 from vlogcut.schemas import EDL, Clip, Shot, StyleProfile, TransitionMix
 from vlogcut.style.profile import kind_alternation, profile_from_durations
 
-LOG_DIMS = ("p10", "median", "p90", "cuts_per_min", "intro_pace")  # |log2 ratio|
+# Tempo octave errors (double/half speed) read as 1.0, just like pacing ratios.
+LOG_DIMS = ("p10", "median", "p90", "cuts_per_min", "intro_pace", "music_bpm")  # |log2 ratio|
 RATIO_DIMS = (  # |difference|
     "beat_aligned_ratio", "speech_ratio", "dissolve", "montage_share", "kind_alternation",
 )  # fmt: skip
@@ -39,6 +42,7 @@ _LABELS = {
     "dissolve": "dissolve",
     "montage_share": "montage_share",
     "intro_pace": "intro_pace",
+    "music_bpm": "music_bpm",
     "kind_alternation": "kind_alternation",
     "brightness": "brightness",
     "saturation": "saturation",
@@ -77,6 +81,7 @@ def dimensions(profile: StyleProfile) -> dict[str, float | None]:
         "brightness": profile.look.brightness if profile.look is not None else None,
         "saturation": profile.look.saturation if profile.look is not None else None,
         "warmth": profile.look.warmth if profile.look is not None else None,
+        "music_bpm": profile.music_bpm,
     }
 
 
@@ -86,6 +91,8 @@ def profile_distance(a: StyleProfile, b: StyleProfile) -> StyleDistance:
     unmeasured: list[str] = []
     for dim in (*LOG_DIMS, *RATIO_DIMS, *LOOK_DIMS):
         x, y = va[dim], vb[dim]
+        if dim == "music_bpm" and x is None and y is None:
+            continue  # Preserve distance and diff output for profiles without BPM.
         if x is None or y is None:
             unmeasured.append(dim)
         elif dim in LOG_DIMS:
@@ -139,7 +146,7 @@ def profile_from_edl(
 def format_profile(name: str, profile: StyleProfile) -> str:
     rows = [f"{name}: {profile.notes}" if profile.notes else name]
     for dim, value in dimensions(profile).items():
-        if value is not None:
+        if value is not None and dim != "music_bpm":
             rows.append(f"{_LABELS[dim]:<14}{value:>9.2f}")
     if profile.music_bpm is not None:
         rows.append(f"{'music BPM':<14}{profile.music_bpm:>9.1f}")
@@ -164,9 +171,14 @@ def format_diff(
     w = max(len(a_name), len(b_name), 9)
     rows = [f"{'':<14}{a_name:>{w}}  {b_name:>{w}}  {'delta':>8}"]
     for dim, delta in d.per_dim.items():
-        rows.append(f"{_LABELS[dim]:<14}{va[dim]:>{w}.2f}  {vb[dim]:>{w}.2f}  {delta:>8.2f}")
-    pacing_only = all(dim in LOG_DIMS for dim in d.per_dim)
-    unit = "octaves" if pacing_only else "octaves (pacing) and ratio points, mixed"
+        precision = 1 if dim == "music_bpm" else 2
+        rows.append(
+            f"{_LABELS[dim]:<14}{va[dim]:>{w}.{precision}f}  "
+            f"{vb[dim]:>{w}.{precision}f}  {delta:>8.2f}"
+        )
+    log_only = all(dim in LOG_DIMS for dim in d.per_dim)
+    scales = "pacing, tempo" if "music_bpm" in d.per_dim else "pacing"
+    unit = "octaves" if log_only else f"octaves ({scales}) and ratio points, mixed"
     rows.append(f"distance      {d.total:.2f} {unit}; mean over {len(d.per_dim)} dims")
     if d.unmeasured:
         rows.append("not measured on both sides: " + ", ".join(d.unmeasured))
