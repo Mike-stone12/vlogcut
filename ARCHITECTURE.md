@@ -133,11 +133,16 @@ cannot be learned from them. Two sources do carry that signal:
   → edit) pair. Running analyze on those sources yields chosen vs. skipped shots.
 - Preference pairs from the variant feedback loop (§7).
 
-A small pairwise ranker (gradient-boosted trees or a tiny MLP over quality metrics,
-motion, speech, shot kind and a CLIP embedding; CPU, seconds to train, fully local)
-turns these into a `score(shot)` that plugs into the rules planner and is shown to the
-LLM planner. No end-to-end "video → edit" model: there is no data for it, it is not
-explainable, and it would break principle 2.
+`learn/ranker.py` now provides pure-Python linear pairwise logistic training on
+chosen/skipped `Shot` pairs, with deterministic full-batch gradient descent and
+standardisation stored alongside weights in a JSON-round-trippable `RankerModel`.
+Features use existing shot durations, usable ranges, quality metrics, warning and
+cut-point counts, and interest; missing optional values have explicit indicators.
+Training and scoring run locally on CPU with no new dependencies. Callers decide
+whether to exclude rejected shots. The ranker is not yet wired into planners or
+the shot table; draft import and deriving shot pairs from feedback remain planned.
+No CLIP embedding is used yet. No end-to-end "video → edit" model: there is no data
+for it, it is not explainable, and it would break principle 2.
 
 ### 4. Plan (**planner** role, or rules + ranker)
 - Input: shot table as text (id, time, duration, kind, caption, tags, quality, ranker
@@ -437,6 +442,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · learn: pure-Python pairwise shot ranker (learn/ranker.py)
 - [x] Week 5 · feedback: edit constraints fed into the LLM planner via cut --constraints (plan/llm.py, pipeline.py, cli.py)
 - [x] Week 3 · style: look stats in style distance (style/distance.py)
 - [x] Week 3 · style: look stats from references (schemas.py, style/profile.py)
@@ -519,6 +525,14 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: first shot ranker uses linear pairwise logistic training in pure
+  Python with no new dependencies. Population means and scales are stored in
+  `RankerModel` with its weights; zero-variance features use scale 1. Features
+  are limited to existing `Shot` and `QualityFlags` fields, with neutral defaults
+  and missing indicators for optional values. No CLIP embedding yet. This is a
+  standalone analysis artefact: no schema, planner, pipeline or CLI changes;
+  draft import and feedback-to-shot pair derivation remain planned.
 
 - 2026-10-19: feedback constraints reach the LLM planner through `cut --constraints`
   and `pipeline.cut(constraints=...)`. Load the JSON string list saved by
