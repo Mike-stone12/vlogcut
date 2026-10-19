@@ -160,6 +160,32 @@ def test_unmeasured_kind_alternation_preserves_edl_bytes(
         assert rough_cut(shots, assets, params, unmeasured).model_dump_json().encode() == expected
 
 
+@pytest.mark.parametrize("strategy", ["coverage", "highlights"])
+@pytest.mark.parametrize("target", [0.0, 1.0])
+@pytest.mark.parametrize("talking", [False, True])
+def test_unimprovable_kind_alternation_preserves_edl_bytes(
+    strategy: str, target: float, talking: bool
+) -> None:
+    shots = [_shot("a", i, usable_range=(0, 2)) for i in range(20)]
+    for shot in shots:
+        shot.kind = "talking" if talking else "broll"
+    assets = [_asset("a", 0)]
+    params = RoughCutParams(target_s=24, strategy=strategy)
+    profile = StyleProfile(
+        shot_duration_s=DEFAULT_PACING,
+        cuts_per_min=20,
+        structure=StructureStats(montage_share=0.4, intro_pace_ratio=0.5),
+    )
+    plain = rough_cut(shots, assets, params, profile)
+    # Limited usable ranges force count fitting to add clips before the no-op swap.
+    assert len(plain.clips) > round(params.target_s / expected_length(DEFAULT_PACING))
+    assert "kind_alternation" not in profile.model_dump()["structure"]
+    profile.structure = profile.structure.model_copy(update={"kind_alternation": target})
+    measured = rough_cut(shots, assets, params, profile)
+    assert measured.model_dump_json().encode() == plain.model_dump_json().encode()
+    assert validate_edl(measured, shots, profile, target_s=params.target_s) == []
+
+
 @pytest.mark.parametrize("ranked,expected", [(False, 1), (True, 3)])
 def test_alternation_uses_blended_scores_and_filters(ranked: bool, expected: int) -> None:
     shots = [_shot("a", i) for i in range(8)]

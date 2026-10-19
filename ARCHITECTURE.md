@@ -650,9 +650,10 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   blended candidate score, including ranker percentiles; ties use earliest source
   start, then shot ID. For the same candidate, prefer the smallest gap, then the
   earliest picked position. Recompute after each swap; stop without improvement
-  or after at most the picked count. Clip-count fitting uses duration bounds;
-  final length assignment, intro pacing, montage bursts, snapping and optional
-  cold open all consume the swapped set. Cold open can change measured adjacency.
+  or after at most the picked count. Clip-count fitting is unchanged; lengths are
+  reassigned after the swaps. Final length assignment, intro pacing, montage
+  bursts, snapping and optional cold open all consume the swapped set. Cold open
+  can change measured adjacency.
   Missing profile, structure or alternation bypasses the pass and preserves EDL
   JSON bytes. Validation remains unchanged and ignores alternation; no schema,
   LLM prompt, repair, reference measurement or style-distance changes.

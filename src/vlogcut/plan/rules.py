@@ -593,14 +593,8 @@ def rough_cut(
     seen: set[int] = set()
     while True:
         picked = select(cands, k, params.strategy)
-        if alternation is None:
-            lengths = _lengths(picked, pace, target, intro_ratio, montage)
-            total = sum(lengths)
-        else:
-            # Count fitting needs only bounds; assign lengths after the final swaps.
-            total = min(
-                max(target, len(picked) * pace.p10), sum(min(pace.p90, c.avail) for c in picked)
-            )
+        lengths = _lengths(picked, pace, target, intro_ratio, montage)
+        total = sum(lengths)
         seen.add(len(picked))
         if total < target * (1 - tol) and len(picked) < len(cands) and len(picked) + 1 not in seen:
             k = len(picked) + 1
