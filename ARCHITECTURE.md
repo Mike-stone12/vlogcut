@@ -116,7 +116,8 @@ flags are skipped: references are finished edits), then aggregate:
   the LLM prompt describes a measured value, including zero, as guidance. The
   rules planner swaps eligible shots to approach it without reordering clips;
   validation still ignores this dimension.
-  Intro length, speech ratio and cold-open measurement remain planned. Pacing alone
+  Speech ratio is measured for EDL-derived profiles with analyzed shots (see Audio);
+  reference speech ratio, intro length and cold-open measurement remain planned. Pacing alone
   reads as a speed slider; structure is what makes a cut recognisably someone's.
   Cold-open allowance is user-set. The rules planner uses the intro pacing ratio
   to shape clip lengths before fitting the total, uses measured `montage_share`
@@ -127,7 +128,10 @@ flags are skipped: references are finished edits), then aggregate:
   validation is unchanged.
 - Transitions: share of hard cuts / dissolves (from `analyze/transitions.py`); fades
   through black currently count as two dissolves
-- Audio: speech-over-music ratio, whether clip audio is kept under music
+- Audio: EDL-derived speech ratio measures talking timeline duration / known-kind
+  timeline duration from analyzed shots, including clip speeds. Reference-video
+  speech measurement, speech-over-music ratio and whether clip audio is kept under
+  music remain planned
 - Look: brightness / saturation / warmth stats measured from reference proxies into
   `StyleProfile.look`, using the pure helper in `analyze/look.py`. Samples are cached
   per reference and pooled by frame count. Style distance uses all three look
@@ -337,8 +341,20 @@ still loads. `kind` is only `pause` for now; other kinds will add literals later
 
 `StyleProfile.beat_aligned_ratio` pools aligned cuts / total cuts over references with
 detected beats. It is `None` if beat detection is disabled for any reference, no
-reference has beats, or the pooled cut count is zero. `speech_ratio` remains `None`
-until its analysis is wired in: `None` means "not measured", which is not the same as 0.
+reference has beats, or the pooled cut count is zero.
+`StyleProfile.speech_ratio` is measured by `profile_from_edl(..., shots=...)`:
+map each clip's shot ID through `analyze/kind.classify_kind`, then divide the total
+speed-adjusted timeline duration of `talking` clips by that of all known-kind
+(`talking` or `broll`) clips. Unknown IDs and `None` kinds are excluded from both
+totals; clamp the result to [0, 1] against floating-point drift. Missing shots or
+no known-kind clips yield `None` (not measured), distinct from measured 0.0 for
+all b-roll. This is a coarse heuristic from `kept_for_audio`, not speech-specific
+VAD; explicit shot kinds take precedence. Reference-video profiles leave it `None`.
+Style distance uses absolute difference when both sides measure it, including zero;
+otherwise it is skipped and listed as unmeasured. Style show displays measured
+values, and style diff adds a row when both sides measure it. Planners and validation
+do not use speech ratio yet. Unmeasured values still serialize as `"speech_ratio":null`,
+preserving existing profile JSON bytes; no schema change is needed.
 `StyleProfile.transitions: TransitionMix | None = None` follows the same convention:
 `hard_cut` and `dissolve` are shares in [0, 1], summing to 1 within 1e-6. Old profile
 JSON without this field still loads. The mix is unmeasured when dissolve detection is off
@@ -654,6 +670,17 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: EDL speech ratio — the pure `style/distance.speech_ratio` helper
+  weights classified clip kinds by speed-adjusted timeline duration: talking / all
+  known kinds, clamped to [0, 1]. `profile_from_edl` reuses the `classify_kind`
+  mapping used for alternation. Unknown IDs and unmeasured kinds contribute to
+  neither total; absent shots or no known kinds give `None`, while all b-roll gives
+  0.0. The `kept_for_audio` fallback is a coarse audio-activity heuristic, not
+  speech-specific VAD. Existing distance and style show/diff already support this
+  dimension, including zero. Reference measurement, planners, validation, schemas
+  and dependencies are unchanged; unmeasured JSON retains its existing null field
+  and unmeasured display output is byte-identical.
 
 - 2026-10-19: music cue timing — **schema change**: optional finite `end_s` must
   follow `start_s`; finite non-negative `fade_in_s` and `fade_out_s` must fit their

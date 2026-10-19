@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 import pytest
 
 from vlogcut.pipeline import cut
@@ -21,7 +23,7 @@ from vlogcut.style import (
     profile_distance,
     profile_from_edl,
 )
-from vlogcut.style.distance import format_diff, format_profile
+from vlogcut.style.distance import format_diff, format_profile, speech_ratio
 
 
 def _profile(p10: float, median: float, p90: float, cpm: float, **extra) -> StyleProfile:
@@ -73,6 +75,58 @@ def test_ratio_dims_count_only_when_measured_on_both_sides():
         "brightness", "saturation", "warmth",
     ]  # fmt: skip
     assert d.total == pytest.approx(0.5 / 5)  # four pacing dims at 0 plus one ratio dim
+
+
+@pytest.mark.parametrize(("a_value", "b_value"), [(0.2, 0.7), (0.0, 0.0), (0.0, 1.0)])
+def test_speech_ratio_distance(a_value: float, b_value: float) -> None:
+    a = _profile(1, 2, 4, 20, speech_ratio=a_value)
+    b = _profile(1, 2, 4, 20, speech_ratio=b_value)
+    for left, right in [(a, b), (b, a)]:
+        distance = profile_distance(left, right)
+        assert distance.per_dim["speech_ratio"] == pytest.approx(abs(a_value - b_value))
+        assert "speech_ratio" not in distance.unmeasured
+        assert distance.total == pytest.approx(abs(a_value - b_value) / 5)
+
+
+def test_speech_ratio_distance_skips_unmeasured_on_either_side() -> None:
+    a = _profile(1, 2, 4, 20, speech_ratio=0.0)
+    b = _profile(1, 2, 4, 20)
+    for left, right in [(a, b), (b, a), (b, b)]:
+        distance = profile_distance(left, right)
+        assert "speech_ratio" not in distance.per_dim
+        assert "speech_ratio" in distance.unmeasured
+        assert distance.total == 0
+        lines = format_diff("a", left, "b", right, distance).splitlines()
+        assert not any(line.startswith("speech ratio") for line in lines)
+        assert "speech_ratio" in lines[-1]
+    assert "speech ratio" not in format_profile("b", b)
+
+
+def test_speech_ratio_weights_speed_adjusted_durations_and_excludes_unknowns() -> None:
+    clips = [
+        Clip(shot_id="talk", in_s=1, out_s=9, speed=2),  # 4 s
+        Clip(shot_id="broll", in_s=0, out_s=3, speed=0.5),  # 6 s
+        Clip(shot_id="talk", in_s=2, out_s=4),  # 2 s, repeated shot counts again
+        Clip(shot_id="unknown", in_s=0, out_s=100),
+        Clip(shot_id="missing", in_s=0, out_s=100),
+    ]
+    assert speech_ratio(clips, {"talk": "talking", "broll": "broll", "unknown": None}) == 0.5
+
+
+@pytest.mark.parametrize(
+    ("kinds", "expected"),
+    [
+        ({"s0": "broll", "s1": "broll"}, 0.0),
+        ({"s0": "talking", "s1": "talking"}, 1.0),
+        ({"s0": None, "s1": None}, None),
+        ({}, None),
+    ],
+)
+def test_speech_ratio_known_and_unmeasured_kinds(
+    kinds: dict[str, Literal["talking", "broll"] | None], expected: float | None
+) -> None:
+    assert speech_ratio(_edl([2, 4]).clips, kinds) == expected
+    assert speech_ratio([], kinds) is None
 
 
 def test_identical_looks_have_zero_distance() -> None:
@@ -174,6 +228,7 @@ def test_profile_from_edl_without_shots_preserves_previous_json_bytes() -> None:
     assert profile_from_edl(edl, "custom").model_dump_json() == previous
     for supplied in (None, []):
         profile = profile_from_edl(edl, "custom", shots=supplied)
+        assert profile.speech_ratio is None
         assert profile.structure.kind_alternation is None
         assert profile.model_dump_json() == previous
 
@@ -190,6 +245,25 @@ def kind_shots() -> list[Shot]:
         ),
         Shot(shot_id="s3", asset_id="a", start_s=12, end_s=16, quality=quality),
     ]  # fmt: skip
+
+
+def test_profile_from_edl_speech_ratio_uses_classifier_and_clip_durations(
+    kind_shots: list[Shot],
+) -> None:
+    edl = _edl([4, 3, 2, 2])
+    edl.clips[0].speed = 2
+    edl.clips[1].speed = 0.5
+    original_edl = edl.model_dump_json()
+    original_shots = [shot.model_dump_json() for shot in kind_shots]
+    profile = profile_from_edl(edl, shots=list(reversed(kind_shots)))
+    assert profile.speech_ratio == pytest.approx(4 / 12)
+    assert edl.model_dump_json() == original_edl
+    assert [shot.model_dump_json() for shot in kind_shots] == original_shots
+    assert StyleProfile.model_validate_json(profile.model_dump_json()) == profile
+    edl.clips = [edl.clips[1], edl.clips[3]]
+    profile = profile_from_edl(edl, shots=kind_shots)
+    assert profile.speech_ratio == 0.0
+    assert '"speech_ratio":0.0' in profile.model_dump_json()
 
 
 def test_profile_from_edl_kind_alternation_uses_classifier_and_clip_order(
@@ -230,8 +304,13 @@ def test_profile_from_edl_unknown_kind_breaks_adjacency(
         )
     )  # fmt: skip
     assert profile_from_edl(edl, shots=kind_shots).structure.kind_alternation is None
+    assert profile_from_edl(edl, shots=kind_shots).speech_ratio == 0.5
     edl.clips.append(Clip(shot_id="s1", in_s=0, out_s=2))
     assert profile_from_edl(edl, shots=kind_shots).structure.kind_alternation == 0.0
+    assert profile_from_edl(edl, shots=kind_shots).speech_ratio == pytest.approx(1 / 3)
+    for clip in edl.clips:
+        clip.shot_id = unknown
+    assert profile_from_edl(edl, shots=kind_shots).speech_ratio is None
 
 
 def test_profile_from_edl_measures_bursts_in_speed_adjusted_timeline_order() -> None:
