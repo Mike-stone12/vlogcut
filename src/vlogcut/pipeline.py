@@ -10,8 +10,10 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Literal
+from threading import Lock
+from typing import Literal, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -28,6 +30,8 @@ REPAIRABLE_CODES = frozenset(
 )
 
 Progress = Callable[[str], None]
+_T = TypeVar("_T")
+_R = TypeVar("_R")
 
 
 class CutResult(BaseModel):
@@ -57,26 +61,77 @@ def find_footage(folder: str | Path) -> list[Path]:
     )
 
 
+def _run_ordered(
+    step: Callable[[int, _T], _R],
+    items: Sequence[_T],
+    workers: int,
+    collect: Callable[[_R], None],
+) -> None:
+    """Collect in input order, including errors; cancel pending work on failure."""
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
+    if workers == 1:
+        for i, item in enumerate(items, 1):
+            collect(step(i, item))
+        return
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = []
+        try:
+            for i, item in enumerate(items, 1):
+                futures.append(executor.submit(step, i, item))
+            for future in futures:
+                collect(future.result())
+        finally:
+            for future in futures:
+                future.cancel()
+
+
 def ingest(
-    files: list[Path], workspace: Path, progress: Progress = log.info
+    files: list[Path], workspace: Path, progress: Progress = log.info, *, workers: int = 1
 ) -> tuple[list[MediaAsset], list[tuple[str, str]]]:
+    """Probe and proxy in input order; progress may run on worker threads."""
     assets, skipped = [], []
-    for i, path in enumerate(files, 1):
+    locks: dict[str, Lock] = {}
+    registry_lock = Lock()
+
+    def ingest_asset(i: int, path: Path) -> MediaAsset | tuple[str, str]:
         progress(f"[{i}/{len(files)}] ingest {path.name}")
         try:
-            assets.append(make_proxy(probe_asset(path), workspace))
+            asset = probe_asset(path)
+            if workers == 1:
+                return make_proxy(asset, workspace)
+            # Identical source content shares an ID and a proxy temp filename.
+            with registry_lock:
+                lock = locks.setdefault(asset.asset_id, Lock())
+            with lock:
+                return make_proxy(asset, workspace)
         except ProbeError as exc:
-            skipped.append((path.name, str(exc)))
-            log.warning("skipping %s: %s", path.name, exc)
+            return path.name, str(exc)
+
+    def collect(result: MediaAsset | tuple[str, str]) -> None:
+        if isinstance(result, MediaAsset):
+            assets.append(result)
+        else:
+            skipped.append(result)
+            log.warning("skipping %s: %s", *result)
+
+    _run_ordered(ingest_asset, files, workers, collect)
     return assets, skipped
 
 
-def analyze(assets: list[MediaAsset], workspace: Path, progress: Progress = log.info) -> list[Shot]:
+def analyze(
+    assets: list[MediaAsset], workspace: Path, progress: Progress = log.info, *, workers: int = 1
+) -> list[Shot]:
+    """Analyze in input order; progress callbacks must support worker threads."""
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
     from vlogcut.analyze import assess_shots, detect_shots  # heavy optional deps
     from vlogcut.analyze.pauses import analyze_pauses, cut_points_for_span
 
     shots: list[Shot] = []
-    for i, asset in enumerate(assets, 1):
+    locks = {asset.asset_id: Lock() for asset in assets} if workers > 1 else {}
+
+    def analyze_asset(i: int, asset: MediaAsset) -> list[Shot]:
         progress(f"[{i}/{len(assets)}] analyze {Path(asset.path).name}")
         asset_shots = assess_shots(asset, detect_shots(asset, workspace), workspace)
         progress(f"[{i}/{len(assets)}] pauses {Path(asset.path).name}")
@@ -84,7 +139,16 @@ def analyze(assets: list[MediaAsset], workspace: Path, progress: Progress = log.
         for shot in asset_shots:
             # Refresh even on quality-cache hits: old records have no cut points.
             shot.cut_points = cut_points_for_span(midpoints, shot.start_s, shot.end_s)
-        shots += asset_shots
+        return asset_shots
+
+    def step(i: int, asset: MediaAsset) -> list[Shot]:
+        if workers == 1:
+            return analyze_asset(i, asset)
+        # Protect shot/keyframe, quality and pause caches for duplicate IDs.
+        with locks[asset.asset_id]:
+            return analyze_asset(i, asset)
+
+    _run_ordered(step, assets, workers, shots.extend)
     return shots
 
 
@@ -155,7 +219,10 @@ def cut(
     render: bool = True,
     preview_params: dict | None = None,
     progress: Progress = log.info,
+    workers: int = 1,
 ) -> CutResult:
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
     from vlogcut.plan import RoughCutParams, rough_cut
     from vlogcut.plan.llm import PlannerError, plan_with_repair
     from vlogcut.render import PreviewParams, render_preview
@@ -169,10 +236,11 @@ def cut(
     files = find_footage(folder)
     if not files:
         raise FileNotFoundError(f"no video files in {folder}")
-    assets, skipped = ingest(files, workspace, progress)
+    worker_options = {"workers": workers} if workers != 1 else {}
+    assets, skipped = ingest(files, workspace, progress, **worker_options)
     if not assets:
         raise FileNotFoundError(f"none of the {len(files)} files in {folder} is usable footage")
-    shots = analyze(assets, workspace, progress)
+    shots = analyze(assets, workspace, progress, **worker_options)
 
     progress(
         f"plan {strategy}, target {target_s:.0f} s" + (f", style {style.name}" if style else "")
