@@ -132,6 +132,11 @@ gain_db (number, default 0). No music tracks are supplied here, so leave music e
             else " Dissolve share: not measured."
         )
         pacing = "\n".join([pacing, *_structure_lines(profile)])
+        if profile.speech_ratio is not None:
+            pacing += (
+                f"\nSpeech ratio={profile.speech_ratio:.2f}: aim for roughly this share "
+                "of the timeline duration from talking clips, with the rest from b-roll."
+            )
     constraint_lines = [" ".join(text.split()) for text in constraints or () if text.strip()]
     user = "\n".join(
         [

@@ -272,6 +272,86 @@ def test_repair_retains_kind_alternation_once_in_conversation(
     assert "Talking/b-roll alternation" not in client.requests[1]["messages"][-1]["content"]
 
 
+@pytest.mark.parametrize("speech_ratio, formatted", [(0.35, "0.35"), (0.0, "0.00")])
+@pytest.mark.parametrize(
+    "structure",
+    [None, StructureStats(montage_share=0.3, intro_pace_ratio=0.5, kind_alternation=0.62)],
+)
+def test_messages_describe_measured_speech_ratio(
+    shots: list[Shot], speech_ratio: float, formatted: str, structure: StructureStats | None
+) -> None:
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1, median=5, p90=8),
+        cuts_per_min=12,
+        structure=structure,
+        speech_ratio=speech_ratio,
+    )
+    before = profile.model_dump()
+    messages = build_planner_messages(shots, target_s=60, profile=profile)
+    assert messages == build_planner_messages(shots, target_s=60, profile=profile)
+    line = (
+        f"Speech ratio={formatted}: aim for roughly this share of the timeline duration "
+        "from talking clips, with the rest from b-roll."
+    )
+    assert messages[1]["content"].splitlines().count(line) == 1
+    baseline = build_planner_messages(
+        shots, target_s=60, profile=profile.model_copy(update={"speech_ratio": None})
+    )
+    assert messages[0] == baseline[0]
+    assert messages[1]["content"].replace(line + "\n", "") == baseline[1]["content"]
+    assert profile.model_dump() == before
+
+
+@pytest.mark.parametrize(
+    "structure",
+    [
+        None,
+        StructureStats(montage_share=0),
+        StructureStats(montage_share=0.3, kind_alternation=0.62),
+    ],
+)
+@pytest.mark.parametrize("cold_open_clips", [0, 2])
+def test_unmeasured_speech_ratio_preserves_prompt_bytes(
+    shots: list[Shot], structure: StructureStats | None, cold_open_clips: int
+) -> None:
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1, median=5, p90=8),
+        cuts_per_min=12,
+        structure=structure,
+        cold_open_clips=cold_open_clips,
+    )
+    baseline = build_planner_messages(shots, target_s=60, profile=profile)
+    explicit_none = profile.model_copy(update={"speech_ratio": None})
+    messages = build_planner_messages(shots, target_s=60, profile=explicit_none)
+    assert json.dumps(messages).encode("utf-8") == json.dumps(baseline).encode("utf-8")
+    assert "Speech ratio" not in str(messages)
+
+
+@pytest.mark.parametrize("speech_ratio", [0.35, 0.0])
+@pytest.mark.parametrize("parse_error", [False, True])
+def test_repair_retains_speech_ratio_once_in_conversation(
+    tmp_path: Path, shots: list[Shot], valid_json: str, speech_ratio: float, parse_error: bool
+) -> None:
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1, median=5, p90=8),
+        cuts_per_min=12,
+        speech_ratio=speech_ratio,
+    )
+    raw = "not JSON" if parse_error else valid_json.replace('"s2"', '"missing"')
+    router, client = make_router(tmp_path, [raw, valid_json])
+    result = plan_with_repair(router, shots, target_s=10, profile=profile)
+    assert result.rounds == 1
+    assert result.violations == []
+    assert len(client.requests) == 2
+    initial = client.requests[0]["messages"]
+    for request in client.requests:
+        messages = request["messages"]
+        assert messages[:2] == initial
+        conversation = "\n".join(message["content"] for message in messages)
+        assert conversation.count(f"Speech ratio={speech_ratio:.2f}") == 1
+    assert "Speech ratio" not in client.requests[1]["messages"][-1]["content"]
+
+
 @pytest.mark.parametrize("structure", [None, StructureStats(montage_share=0.3)])
 def test_messages_allow_cold_open(shots: list[Shot], structure: StructureStats | None) -> None:
     profile = StyleProfile(

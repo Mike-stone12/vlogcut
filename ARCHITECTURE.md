@@ -124,12 +124,14 @@ flags are skipped: references are finished edits), then aggregate:
   to group short clips into consecutive non-talking bursts, and can produce one opt-in cold
   open with `pipeline.cut(cold_open=True)` or `vlogcut cut --cold-open` when a
   `--style` profile has `cold_open_clips > 0`. The LLM planner prompt describes
-  measured `montage_share`, `intro_pace_ratio`, `kind_alternation` and the cold-open allowance;
-  validation is unchanged.
+  measured `montage_share`, `intro_pace_ratio`, `kind_alternation`, `speech_ratio`
+  and the cold-open allowance; validation is unchanged.
 - Transitions: share of hard cuts / dissolves (from `analyze/transitions.py`); fades
   through black currently count as two dissolves
 - Audio: EDL-derived speech ratio measures talking timeline duration / known-kind
-  timeline duration from analyzed shots, including clip speeds. Reference-video
+  timeline duration from analyzed shots, including clip speeds. The LLM prompt
+  describes a measured value as guidance for the talking/b-roll duration split;
+  the rules planner and validation still ignore it. Reference-video
   speech measurement, speech-over-music ratio and whether clip audio is kept under
   music remain planned
 - Look: brightness / saturation / warmth stats measured from reference proxies into
@@ -202,8 +204,13 @@ for it, it is not explainable, and it would break principle 2.
   when a fixed-length window fits within the usable part and the maximum shift
 - `plan/llm.py` provides deterministic prompt building and EDL parsing via
   `ModelRouter` with the `planner` role, plus a bounded repair loop feeding parse
-  errors and hard-check violations back into the same conversation. The LLM planner
-  and repair loop are opt-in via `pipeline.cut(planner="llm", router=...)` or
+  errors and hard-check violations back into the same conversation. Initial style
+  guidance describes measured `montage_share`, `intro_pace_ratio`, `kind_alternation`
+  and `speech_ratio`, plus the cold-open allowance. Measured speech ratio, including
+  zero, adds one line with two decimal places targeting roughly that share of
+  timeline duration from talking clips and the rest from b-roll, even without
+  structure data. `None` preserves prompt bytes; repair rounds do not repeat the line.
+  The LLM planner and repair loop are opt-in via `pipeline.cut(planner="llm", router=...)` or
   `vlogcut cut --planner llm`; the rules planner stays the default. The CLI reads
   `--config` (default `config.yaml`) for LLM planning or `--caption`, sharing one
   router when both are requested, and accepts `--brief`. Optional edit constraints
@@ -352,8 +359,12 @@ all b-roll. This is a coarse heuristic from `kept_for_audio`, not speech-specifi
 VAD; explicit shot kinds take precedence. Reference-video profiles leave it `None`.
 Style distance uses absolute difference when both sides measure it, including zero;
 otherwise it is skipped and listed as unmeasured. Style show displays measured
-values, and style diff adds a row when both sides measure it. Planners and validation
-do not use speech ratio yet. Unmeasured values still serialize as `"speech_ratio":null`,
+values, and style diff adds a row when both sides measure it. The LLM planner's
+initial prompt describes a measured value, including zero, with two decimal places
+as guidance for the talking/b-roll timeline duration split. Unmeasured values add
+no line and preserve prompt bytes; repair rounds reuse the conversation without
+repeating the line. The rules planner and validation still ignore speech ratio.
+Unmeasured values still serialize as `"speech_ratio":null`,
 preserving existing profile JSON bytes; no schema change is needed.
 `StyleProfile.transitions: TransitionMix | None = None` follows the same convention:
 `hard_cut` and `dissolve` are shares in [0, 1], summing to 1 within 1e-6. Old profile
@@ -435,8 +446,8 @@ allowance is positive; it is off by default. Clip timing is preserved,
 the remaining clips stay chronological, and newly joined duplicate groups are avoided.
 The LLM planner prompt describes a positive allowance as at most N leading hook
 clips before the chronological remainder; validation is unchanged. Missing structure
-dimensions add no prompt lines. Without structure and with zero cold-open allowance,
-or without a profile, prompt bytes are unchanged.
+dimensions add no prompt lines. Without structure, with unmeasured speech ratio
+and zero cold-open allowance, or without a profile, prompt bytes are unchanged.
 
 `Clip.transition_in: Transition` defaults to a hard cut, so old EDL JSON still loads.
 `Transition.kind` is `cut` or `dissolve`; `duration_s` is 0 for a cut and strictly
@@ -670,6 +681,13 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: LLM planner speech-ratio guidance — a measured `speech_ratio`,
+  including zero, adds exactly one initial style-guidance line with two decimal
+  places for the talking/b-roll timeline duration split, independent of structure.
+  `None` preserves prompt bytes; repair messages do not repeat the line. The shot
+  table has no kind column, so the guidance does not refer to one. Rules planning,
+  validation, schemas and reference-video speech measurement are unchanged.
 
 - 2026-10-19: EDL speech ratio — the pure `style/distance.speech_ratio` helper
   weights classified clip kinds by speed-adjusted timeline duration: talking / all
