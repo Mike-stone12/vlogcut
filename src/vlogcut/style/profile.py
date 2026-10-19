@@ -41,6 +41,8 @@ class ReferenceParams(BaseModel):
     # them away and inflate p10 for fast-cutting creators
     min_shot_s: float = Field(default=0.25, gt=0)
     dissolves: bool = True  # also find cross-dissolves / fades (analyze.transitions)
+    black_fade_max_gap_s: float = Field(default=transitions.BLACK_FADE_MAX_GAP_S, ge=0)
+    black_fade_max_luma: float = Field(default=transitions.BLACK_FADE_MAX_LUMA, ge=0, le=1)
     beats: bool = True  # measure alignment and tempo of the reference's own audio
     look: bool = True  # sample RGB appearance from the proxy
 
@@ -79,12 +81,18 @@ def combine_cuts(
     hard_cuts: Sequence[float],
     dissolves: Sequence[tuple[float, float]],
     min_gap_s: float,
+    *,
+    transition_cuts: Sequence[float] | None = None,
 ) -> tuple[list[float], list[float]]:
     """Merge detections and identify unique surviving dissolve boundaries."""
-    cuts = transitions.merge_cuts(hard_cuts, dissolves, min_gap_s)
+    cuts = transitions.merge_cuts(hard_cuts, dissolves, min_gap_s, transition_cuts=transition_cuts)
     # merge_cuts emits midpoints unchanged, so exact membership tracks provenance
     # without labelling nearby hard cuts as dissolves. Take values from its output.
-    midpoints = {(start + end) / 2 for start, end in dissolves}
+    midpoints = (
+        {(start + end) / 2 for start, end in dissolves}
+        if transition_cuts is None
+        else set(transition_cuts)
+    )
     dissolve_cuts = [cut for cut in dict.fromkeys(cuts) if cut in midpoints]
     return cuts, dissolve_cuts
 
@@ -319,10 +327,18 @@ def analyze_reference(
     )
     dissolve_cuts = []
     if params.dissolves:
-        found = transitions.find_dissolves(
-            transitions.load_frames(asset.proxy_path), transitions.SAMPLE_FPS
+        frames = transitions.load_frames(asset.proxy_path)
+        found = transitions.find_dissolves(frames, transitions.SAMPLE_FPS)
+        found, boundaries = transitions.merge_black_fades(
+            found,
+            frames.mean(axis=(1, 2)),
+            transitions.SAMPLE_FPS,
+            max_gap_s=params.black_fade_max_gap_s,
+            max_luma=params.black_fade_max_luma,
         )
-        cuts, dissolve_cuts = combine_cuts(cuts, found, params.min_shot_s)
+        cuts, dissolve_cuts = combine_cuts(
+            cuts, found, params.min_shot_s, transition_cuts=boundaries
+        )
     beats = []
     if params.beats and asset.has_audio:
         from vlogcut.analyze.beats import BeatParams, detect_beats
@@ -392,6 +408,11 @@ def _load_cache(
     except (ValidationError, ValueError):
         return None
     if record.asset_id != asset_id or record.params != params:
+        return None
+    if (
+        params.dissolves
+        and not {"black_fade_max_gap_s", "black_fade_max_luma"} <= record.params.model_fields_set
+    ):
         return None
     if params.beats and "beats" not in record.params.model_fields_set:
         return None

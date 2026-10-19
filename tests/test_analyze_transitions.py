@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from vlogcut.analyze import ShotParams, detect_shots
-from vlogcut.analyze.transitions import merge_cuts
+from vlogcut.analyze.transitions import merge_black_fades, merge_cuts
 from vlogcut.ingest import ffmpeg, make_proxy, probe_asset
 
 np = pytest.importorskip("numpy")
@@ -44,7 +44,7 @@ def test_cross_dissolve_found_with_correct_span():
     assert end - start == pytest.approx(15 / FPS, abs=2 / FPS)
 
 
-def test_fade_through_black_gives_two_transitions():
+def test_fade_through_black_detections_merge_for_references():
     a, b, black = _image(3), _image(4), np.zeros((64, 64), np.float32)
     frames = np.concatenate(
         [
@@ -55,7 +55,11 @@ def test_fade_through_black_gives_two_transitions():
             _hold(b, 20),
         ]
     )
-    assert len(find_dissolves(frames, FPS)) == 2
+    found = find_dissolves(frames, FPS)
+    assert len(found) == 2  # raw detections used by footage are unchanged
+    spans, cuts = merge_black_fades(found, frames.mean(axis=(1, 2)), FPS)
+    assert spans == [(found[0][0], found[1][1])]
+    assert cuts == pytest.approx([31.5 / FPS], abs=1 / FPS)
 
 
 def test_hard_cut_is_not_a_dissolve():

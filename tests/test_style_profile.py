@@ -83,6 +83,17 @@ def test_aggregate_look_weights_sampled_frames() -> None:
     assert aggregate([a, b], ReferenceParams()).look is None
 
 
+class _LumaFrames:
+    """Decoded-frame stub for reference wiring tests without NumPy or FFmpeg."""
+
+    def __init__(self, luma: list[float]) -> None:
+        self.luma = luma
+
+    def mean(self, *, axis: tuple[int, int]) -> list[float]:
+        assert axis == (1, 2)
+        return self.luma
+
+
 @pytest.fixture
 def stub_reference(monkeypatch: pytest.MonkeyPatch) -> MediaAsset:
     asset = MediaAsset(
@@ -513,11 +524,11 @@ def test_analyze_reference_records_only_surviving_dissolves(
     monkeypatch.setattr(profile_mod, "probe_asset", lambda path: asset)
     monkeypatch.setattr(profile_mod, "make_proxy", lambda asset, ws: asset)
     monkeypatch.setattr(shots_mod, "detect_cuts", lambda *a, **k: [10])
-    monkeypatch.setattr(profile_mod.transitions, "load_frames", lambda path: None)
+    monkeypatch.setattr(profile_mod.transitions, "load_frames", lambda path: _LumaFrames([1.0]))
     found = [(10.05, 10.15), (19, 21)]
     monkeypatch.setattr(profile_mod.transitions, "find_dissolves", lambda *a: found)
 
-    def merge_cuts(hard, dissolves, min_gap_s):
+    def merge_cuts(hard, dissolves, min_gap_s, *, transition_cuts=None):
         assert hard == [10] and dissolves == found
         assert abs(sum(dissolves[0]) / 2 - hard[0]) < min_gap_s
         # Simulate a removed midpoint; surviving midpoints stay unchanged.
@@ -562,7 +573,9 @@ def test_old_reference_cache_is_recomputed(
     monkeypatch.setattr(
         profile_mod.transitions,
         "load_frames",
-        lambda path: None if detection else pytest.fail("dissolve detection disabled"),
+        lambda path: (
+            _LumaFrames([1.0]) if detection else pytest.fail("dissolve detection disabled")
+        ),
     )
     monkeypatch.setattr(profile_mod.transitions, "find_dissolves", lambda *a: [(19, 21)])
     record = analyze_reference("a.mp4", tmp_path, params)
@@ -627,6 +640,67 @@ def test_old_beat_cache_is_recomputed_and_beats_switch_invalidates(
     monkeypatch.setattr(pauses_mod, "load_mono_audio", decode)
     monkeypatch.setattr(beats_mod, "detect_beats", detect)
     assert analyze_reference("a.mp4", tmp_path, params).beats == [10, 20]
+
+
+@pytest.mark.parametrize("black", [True, False])
+def test_reference_black_fade_shares_pacing_and_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_reference: MediaAsset, black: bool
+) -> None:
+    luma = [0.5] * (32 * 15)
+    if black:
+        for i in range(9 * 15, round(9.5 * 15) + 1):
+            luma[i] = 0.03
+    frames = _LumaFrames(luma)
+    found = [(8, 9), (9.5, 11), (19, 21)]
+    # False hard cuts anywhere within the fade (including black) must be suppressed.
+    hard = [8.5, 9.25, 10.5, 20, 30]
+    monkeypatch.setattr(shots_mod, "detect_cuts", lambda *a, **k: hard)
+    monkeypatch.setattr(profile_mod.transitions, "load_frames", lambda path: frames)
+    monkeypatch.setattr(profile_mod.transitions, "find_dissolves", lambda *a: found)
+    params = ReferenceParams(beats=False, look=False)
+    profile = build_profile(["a.mp4"], tmp_path, params)
+    record = analyze_reference("a.mp4", tmp_path, params)
+    if black:
+        assert record.cuts == [9.25, 20, 30]
+        assert record.dissolve_cuts == [9.25, 20]
+        assert profile.transitions.dissolve == pytest.approx(2 / 3)
+        assert profile.transitions.hard_cut == pytest.approx(1 / 3)
+        assert profile.cuts_per_min == 1.5
+        assert shot_durations(record.cuts, 120, params.min_shot_s) == [9.25, 10.75, 10, 90]
+    else:
+        # The pre-merge reference path must produce byte-identical profiles.
+        cuts, dissolves = combine_cuts(hard, found, params.min_shot_s)
+        previous = aggregate([_ref("a", 120, cuts, dissolves)], params)
+        assert profile.model_dump_json() == previous.model_dump_json()
+    monkeypatch.setattr(shots_mod, "detect_cuts", lambda *a, **k: pytest.fail("redetected"))
+    monkeypatch.setattr(profile_mod.transitions, "load_frames", lambda *a: pytest.fail("decoded"))
+    assert build_profile(["a.mp4"], tmp_path, params) == profile
+
+
+@pytest.mark.parametrize("field", ["black_fade_max_gap_s", "black_fade_max_luma"])
+@pytest.mark.parametrize("missing", [True, False])
+def test_reference_black_fade_cache_params_recompute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_reference: MediaAsset,
+    field: str,
+    missing: bool,
+) -> None:
+    params = ReferenceParams(beats=False, look=False)
+    old = _ref("a", 120, [5]).model_dump()
+    old["params"] = params.model_dump()
+    if missing:
+        old["params"].pop(field)
+    else:
+        old["params"][field] /= 2
+    cache = tmp_path / "style/a.cuts.json"
+    cache.parent.mkdir()
+    cache.write_text(json.dumps(old), encoding="utf-8")
+    monkeypatch.setattr(profile_mod.transitions, "load_frames", lambda path: _LumaFrames([1.0]))
+    monkeypatch.setattr(profile_mod.transitions, "find_dissolves", lambda *a: [])
+    record = analyze_reference("a.mp4", tmp_path, params)
+    assert record.cuts == [10, 20]
+    assert json.loads(cache.read_text(encoding="utf-8"))["params"] == params.model_dump()
 
 
 @pytest.mark.parametrize("has_audio", [False, True])
