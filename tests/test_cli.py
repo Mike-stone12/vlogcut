@@ -467,13 +467,33 @@ def test_style_diff_measured_look(tmp_path: Path, capsys: pytest.CaptureFixture)
     assert ["warmth", "-0.20", "0.20", "0.20"] in rows
 
 
+@pytest.mark.parametrize(("a_bpm", "b_bpm"), [(120, 60), (60, 120), (123.456, 123.456)])
+def test_style_diff_measured_music_bpm(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], a_bpm: float, b_bpm: float
+) -> None:
+    paths = [_write_profile(tmp_path / name, 1, 2, 4, 20) for name in ("a.json", "b.json")]
+    for path, value in zip(paths, [a_bpm, b_bpm], strict=True):
+        profile = json.loads(path.read_text(encoding="utf-8"))
+        profile["music_bpm"] = value
+        path.write_text(json.dumps(profile), encoding="utf-8")
+    assert cli.main(["style", "diff", *map(str, paths)]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    rows = [line.split() for line in captured.out.splitlines()]
+    delta = "0.00" if a_bpm == b_bpm else "1.00"
+    assert ["music_bpm", f"{a_bpm:.1f}", f"{b_bpm:.1f}", delta] in rows
+    assert "mean over 5 dims" in captured.out
+
+
 @pytest.mark.parametrize("value", [None, 120.0, 123.456])
-def test_style_show_music_bpm_and_diff_unchanged(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], value: float | None
+@pytest.mark.parametrize("reverse", [False, True])
+def test_style_show_music_bpm_and_diff_skips_unmeasured(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], value: float | None, reverse: bool
 ) -> None:
     path = _write_profile(tmp_path / "tempo.json", 1, 2, 4, 20)
     other = _write_profile(tmp_path / "other.json", 1, 2, 4, 20)
-    assert cli.main(["style", "diff", str(path), str(other)]) == 0
+    paths = [str(other), str(path)] if reverse else [str(path), str(other)]
+    assert cli.main(["style", "diff", *paths]) == 0
     baseline_diff = capsys.readouterr().out
     profile = json.loads(path.read_text(encoding="utf-8"))
     profile["music_bpm"] = value
@@ -484,8 +504,14 @@ def test_style_show_music_bpm_and_diff_unchanged(
         assert not any(row[:2] == ["music", "BPM"] for row in rows)
     else:
         assert ["music", "BPM", f"{value:.1f}"] in rows
-    assert cli.main(["style", "diff", str(path), str(other)]) == 0
-    assert capsys.readouterr().out == baseline_diff
+    assert cli.main(["style", "diff", *paths]) == 0
+    output = capsys.readouterr().out
+    assert not any(line.startswith("music_bpm") for line in output.splitlines())
+    if value is None:
+        assert output == baseline_diff
+    else:
+        assert "music_bpm" in output.splitlines()[-1]
+        assert output.replace(", music_bpm", "") == baseline_diff
 
 
 def test_style_show_measured_transitions(tmp_path, capsys):
