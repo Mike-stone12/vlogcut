@@ -148,6 +148,7 @@ class StructureStats(BaseModel):
     """Measured editing structure, independent of absolute pacing."""
 
     montage_share: float = Field(ge=0, le=1)
+    intro_pace_ratio: float | None = Field(default=None, gt=0)  # None = not measured
 
 
 class StyleProfile(BaseModel):
