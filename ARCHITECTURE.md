@@ -218,8 +218,15 @@ explainable, and it would break principle 2.
   "the café part was too short" is about this edit and becomes a re-plan constraint;
   "too fast overall" is about style and becomes a validated `StyleProfile` delta.
   Mixing the two would drift the profile.
-  Classification exists in `feedback/classify.py`, with pure profile-delta application,
-  but is not wired into the pipeline or CLI.
+  `vlogcut feedback classify FEEDBACK_JSON --profile PROFILE_JSON [-o OUT_PROFILE_JSON]`
+  uses `feedback/classify.py` through the router's `feedback` role (`--config`, default
+  `config.yaml`). Non-blank text is classified against the input profile; verdict-only
+  records are skipped without model calls. Pure profile deltas apply in record order.
+  Output defaults to `<profile stem>.updated.json` beside the input; only explicit `-o`
+  can replace the input profile. Edit constraints print one per line, or are saved as a
+  JSON list with `--constraints-out CONSTRAINTS_JSON`. A stdout summary counts classified
+  records, applied deltas and constraints. Classification is not wired into `cut`, and
+  re-planning from constraints remains planned.
 - Every (context, variant A, variant B, choice) is logged as a preference pair and
   feeds the ranker (§3b)
 
@@ -396,6 +403,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 5 · feedback: CLI classify subcommand applying profile deltas (cli.py)
 - [x] Week 3 · structure: rules planner produces montage bursts from montage_share (plan/rules.py)
 - [x] Week 3 · music: --music CLI flag for beat snapping (cli.py)
 - [x] Week 3 · music: opt-in beat snapping of planned EDLs to user music (pipeline.py)
@@ -466,6 +474,20 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: feedback classification CLI — `feedback classify` loads feedback and
+  style JSON through the existing loaders, then builds `ModelRouter.from_yaml` just
+  as `cut` does, requiring the `feedback` role. Classify each non-blank record once
+  against the original profile, then apply deltas in input order with the existing
+  pure helper. Verdict-only records make no model call; config is still required.
+  Write the updated profile to `-o`, defaulting to `<stem>.updated.json` next to the
+  input; replacing the input requires explicit `-o`. Constraints go to stdout one
+  per line (embedded newlines become spaces), or to `--constraints-out` as a JSON
+  list preserving the strings. Constraint output must differ from both profiles.
+  Each file is replaced atomically after classification and application succeed.
+  Report classified/delta/constraint counts on stdout; file, config and validation
+  errors use one-line `_fail` messages and exit 1. No classifier, schema, pipeline,
+  prompt, re-planning or ranker changes.
 
 - 2026-10-19: music CLI — the existing `vlogcut cut --music PATH` forwards a
   `Path` to `pipeline.cut(music=...)` for opt-in beat snapping. It combines with

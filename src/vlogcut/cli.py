@@ -1,6 +1,6 @@
 """Command line: `vlogcut cut <footage folder>` -> rough-cut preview,
 `vlogcut style build <reference videos>` -> style profile JSON, `style show / diff`.
-`vlogcut feedback page / pairs` -> local variants page / preference-pair JSON.
+`vlogcut feedback page / pairs / classify` -> variants, preferences and profile updates.
 
 Thin wrapper over pipeline, style and feedback helpers; argument parsing and output only.
 """
@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("a", type=Path, help="profile JSON")
     d.add_argument("b", type=Path, help="profile JSON")
 
-    f = sub.add_parser("feedback", help="feedback: variants page and preference pairs")
+    f = sub.add_parser("feedback", help="feedback: variants, preferences and profile updates")
     fs = f.add_subparsers(dest="feedback_command", required=True)
     page = fs.add_parser("page", help="create a local page comparing preview videos")
     page.add_argument("previews", type=Path, nargs="+", metavar="PREVIEW", help="preview mp4s")
@@ -86,6 +86,16 @@ def build_parser() -> argparse.ArgumentParser:
     pairs.add_argument("feedback_json", type=Path, metavar="FEEDBACK_JSON")
     pairs.add_argument("--context", default="", help="project or brief description")
     pairs.add_argument("-o", "--out", type=Path, help="pairs JSON path (default stdout)")
+    classify = fs.add_parser("classify", help="classify feedback and apply style profile deltas")
+    classify.add_argument("feedback_json", type=Path, metavar="FEEDBACK_JSON")
+    classify.add_argument("--profile", type=Path, required=True, metavar="PROFILE_JSON")
+    classify.add_argument(
+        "-o", "--out", type=Path, help="updated profile (default <profile stem>.updated.json)"
+    )
+    classify.add_argument("--constraints-out", type=Path, help="constraints JSON (default stdout)")
+    classify.add_argument(
+        "--config", type=Path, default=Path("config.yaml"), help="model router config"
+    )
     return parser
 
 
@@ -101,7 +111,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "cut":
         return _cut(args)
     if args.command == "feedback":
-        feedback_commands = {"page": _feedback_page, "pairs": _feedback_pairs}
+        feedback_commands = {
+            "page": _feedback_page, "pairs": _feedback_pairs, "classify": _feedback_classify,
+        }  # fmt: skip
         return feedback_commands[args.feedback_command](args)
     commands = {"build": _style_build, "show": _style_show, "diff": _style_diff}
     return commands[args.style_command](args)
@@ -303,6 +315,81 @@ def _feedback_pairs(args: argparse.Namespace) -> int:
         print(f"pairs     {len(pairs)} pairs", file=sys.stderr)
     else:
         print(f"pairs     {args.out} ({len(pairs)} pairs)")
+    return 0
+
+
+def _feedback_classify(args: argparse.Namespace) -> int:
+    from yaml import YAMLError
+
+    from vlogcut.feedback import apply_profile_delta, classify_feedback, load_feedback
+    from vlogcut.llm.router import ModelRouter
+    from vlogcut.style import StyleError, load_profile
+
+    try:
+        records = load_feedback(args.feedback_json)
+        profile = load_profile(args.profile)
+        out = args.out or args.profile.with_name(f"{args.profile.stem}.updated.json")
+        if args.out is None and out.resolve() == args.profile.resolve():
+            raise ValueError("overwriting the input profile requires explicit -o")
+        if args.constraints_out is not None and args.constraints_out.resolve() in {
+            args.profile.resolve(),
+            out.resolve(),
+        }:
+            raise ValueError("--constraints-out must differ from the input and output profiles")
+    except (OSError, ValueError, StyleError) as exc:
+        return _fail(" ".join(str(exc).split()))
+    try:
+        router = ModelRouter.from_yaml(args.config)
+        if "feedback" not in router.roles:
+            raise ValueError("missing feedback role")
+    except (
+        OSError,
+        UnicodeError,
+        YAMLError,
+        ValueError,
+        TypeError,
+        KeyError,
+        AttributeError,
+    ) as exc:
+        return _fail(" ".join(f"invalid model config {args.config}: {exc}".split()))
+
+    try:
+        results = [
+            classify_feedback(router, record, profile) for record in records if record.text.strip()
+        ]
+        constraints: list[str] = []
+        deltas = 0
+        for result in results:
+            if result.delta is not None:
+                profile = apply_profile_delta(profile, result.delta)
+                deltas += 1
+            if result.constraint is not None:
+                constraints.append(result.constraint)
+        documents = [(out, profile.model_dump_json(indent=1))]
+        if args.constraints_out is not None:
+            documents.append((args.constraints_out, json.dumps(constraints, indent=1)))
+        for path, document in documents:
+            temporary: Path | None = None
+            try:
+                with NamedTemporaryFile(
+                    mode="w", encoding="utf-8", newline="\n", dir=path.parent, delete=False
+                ) as handle:
+                    temporary = Path(handle.name)
+                    handle.write(document)
+                temporary.replace(path)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+    except (OSError, ValueError) as exc:
+        return _fail(" ".join(str(exc).split()))
+    if args.constraints_out is None:
+        for constraint in constraints:
+            print(" ".join(constraint.splitlines()))
+    print(
+        f"classified {len(results)} records, applied {deltas} deltas, "
+        f"{len(constraints)} constraints"
+    )
+    print(f"profile   {out}")
     return 0
 
 
