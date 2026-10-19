@@ -50,7 +50,10 @@ def build_parser() -> argparse.ArgumentParser:
     )  # fmt: skip
     c.add_argument("-w", "--workspace", type=Path, help="cache dir (default ./workspace/<folder>)")
     c.add_argument("-o", "--out", type=Path, help="preview path (default inside the workspace)")
-    c.add_argument("--music", type=Path, help="background music file (your own)")
+    c.add_argument(
+        "--music", type=Path, metavar="PATH",
+        help="user music file for beat snapping and background audio",
+    )  # fmt: skip
     c.add_argument("--music-gain", type=float, default=-14.0, help="music level, dB")
     c.add_argument("--background", choices=["black", "blur"], default="black")
     c.add_argument("--no-subtitles", action="store_true", help="no debug subtitle track")
@@ -161,7 +164,8 @@ def _cut(args: argparse.Namespace) -> int:
     except FFmpegNotFoundError as exc:
         return _fail(str(exc))
     except ImportError as exc:
-        return _fail(f'{exc}; install the analysis extra: pip install -e ".[analyze]"')
+        detail = " ".join(str(exc).split())
+        return _fail(f'{detail}; install the analysis extra: pip install -e ".[analyze]"')
     except (FileNotFoundError, RoughCutError, ShotDetectionError, StyleError) as exc:
         return _fail(str(exc))
     except (ProxyError, RenderError, FFmpegError) as exc:

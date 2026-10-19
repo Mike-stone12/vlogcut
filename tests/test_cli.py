@@ -70,6 +70,89 @@ def test_cold_open_forwarded(
     assert cli.main(argv) == 0
 
 
+def test_cut_help_lists_music(capsys: pytest.CaptureFixture) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["cut", "--help"])
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    assert "--music PATH" in captured.out and "beat snapping" in captured.out
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize("music", [False, True])
+@pytest.mark.parametrize("combined", [False, True])
+def test_music_forwarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, music: bool, combined: bool
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    song = Path("song.wav")
+    song.write_bytes(b"unused audio placeholder")
+    captured: dict[str, object] = {}
+
+    def cut(*args: object, **kwargs: object) -> CutResult:
+        captured.update(kwargs)
+        return _cut_result(tmp_path, [])
+
+    monkeypatch.setattr("vlogcut.pipeline.cut", cut)
+    argv = ["cut", str(tmp_path), "--no-render"]
+    if music:
+        argv += ["--music", str(song)]
+    if combined:
+        profile = _write_profile(tmp_path / "style.json", 1, 2, 4, 20)
+        config = tmp_path / "models.yaml"
+        config.write_text(
+            "providers: {fake: {base_url: 'http://fake/v1'}}\n"
+            "roles: {planner: {provider: fake, model: test}, "
+            "captioner: {provider: fake, model: test}}\n",
+            encoding="utf-8",
+        )
+        argv += [
+            "--style", str(profile), "--planner", "llm", "--cold-open", "--caption",
+            "--config", str(config),
+        ]  # fmt: skip
+    else:
+        monkeypatch.setattr(ModelRouter, "from_yaml", lambda *a: pytest.fail("read config"))
+    assert cli.main(argv) == 0
+    assert captured["music"] == (song if music else None)
+    assert captured["cold_open"] is combined and captured["caption"] is combined
+    assert captured["planner"] == ("llm" if combined else "rules")
+    if combined:
+        assert captured["style"] == profile
+        assert isinstance(captured["router"], ModelRouter)
+
+
+def test_missing_music_fails_before_cut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    missing = tmp_path / "missing.wav"
+    monkeypatch.setattr("vlogcut.pipeline.cut", lambda *a, **k: pytest.fail("started cut"))
+    assert cli.main(["cut", str(tmp_path), "--music", str(missing)]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"vlogcut: error: music file not found: {missing}\n"
+
+
+@pytest.mark.parametrize("detail", ["missing analysis dependency", "missing analysis\ndependency"])
+def test_music_import_error_is_one_line_with_analysis_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, detail: str
+) -> None:
+    song = tmp_path / "song.wav"
+    song.write_bytes(b"unused audio placeholder")
+
+    def cut(*args: object, **kwargs: object) -> CutResult:
+        assert kwargs["music"] == song
+        raise ImportError(detail)
+
+    monkeypatch.setattr("vlogcut.pipeline.cut", cut)
+    assert cli.main(["cut", str(tmp_path), "--music", str(song)]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "vlogcut: error: missing analysis dependency; "
+        'install the analysis extra: pip install -e ".[analyze]"\n'
+    )
+
+
 def test_cli_errors_are_one_line_and_exit_1(tmp_path, capsys):
     assert cli.main(["cut", str(tmp_path / "missing")]) == 1
     assert "is not a folder" in capsys.readouterr().err
