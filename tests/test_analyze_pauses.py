@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from vlogcut import pipeline
 from vlogcut.analyze import (
     Pause,
     PauseParams,
@@ -15,9 +17,10 @@ from vlogcut.analyze import (
     load_mono_audio,
     rms_envelope,
 )
-from vlogcut.analyze.pauses import cut_points_for_span
+from vlogcut.analyze import pauses as pause_module
+from vlogcut.analyze.pauses import PauseCache, analyze_pauses, cut_points_for_span
 from vlogcut.ingest import ffmpeg
-from vlogcut.schemas import CutPoint
+from vlogcut.schemas import CutPoint, MediaAsset, QualityFlags, Shot
 
 try:
     import numpy as np
@@ -246,3 +249,156 @@ def test_detect_pauses_without_audio(make_clip: Callable[..., Path]) -> None:
     path = make_clip(audio=False)
     assert load_mono_audio(path) is None
     assert detect_pauses(path) == []
+
+
+@pytest.fixture
+def pause_asset() -> MediaAsset:
+    return MediaAsset(
+        asset_id="asset", path="source.mp4", proxy_path="proxy.mp4",
+        duration_s=8, fps=25, width=64, height=64,
+    )  # fmt: skip
+
+
+def test_pause_cache_hit_and_changed_params(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pause_asset: MediaAsset
+) -> None:
+    calls: list[PauseParams] = []
+
+    def detect(path: str, params: PauseParams) -> list[Pause]:
+        assert path == pause_asset.proxy_path
+        calls.append(params)
+        return [Pause(1, 1.6)] if params.min_pause_s < 0.6 else []
+
+    replace = Path.replace
+    writes: list[Path] = []
+
+    def replace_part(path: Path, target: Path) -> Path:
+        assert path == target.with_suffix(".part")
+        PauseCache.model_validate_json(path.read_text(encoding="utf-8"))
+        writes.append(target)
+        return replace(path, target)
+
+    monkeypatch.setattr(pause_module, "detect_pauses", detect)
+    monkeypatch.setattr(Path, "replace", replace_part)
+    assert analyze_pauses(pause_asset, tmp_path) == [Pause(1, 1.6)]
+    assert analyze_pauses(pause_asset, tmp_path) == [Pause(1, 1.6)]
+    assert calls == [PauseParams()]
+    changed = PauseParams(min_pause_s=0.7)
+    assert analyze_pauses(pause_asset, tmp_path, changed) == []
+    assert analyze_pauses(pause_asset, tmp_path, changed) == []  # empty results also hit
+    assert calls == [PauseParams(), changed]
+    cache_path = tmp_path / "pauses" / "asset.json"
+    assert writes == [cache_path, cache_path]
+    cache = PauseCache.model_validate_json(cache_path.read_text(encoding="utf-8"))
+    assert cache.asset_id == pause_asset.asset_id and cache.params == changed
+    assert not cache_path.with_suffix(".part").exists()
+
+
+@pytest.mark.parametrize(
+    "damage", ["json", "encoding", "missing", "asset", "params", "interval", "nonfinite"]
+)
+def test_invalid_pause_cache_is_a_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pause_asset: MediaAsset, damage: str
+) -> None:
+    record = PauseCache(asset_id="asset", params=PauseParams(), pauses=[Pause(1, 1.6)])
+    data = record.model_dump(mode="json")
+    if damage == "missing":
+        del data["pauses"]
+    elif damage == "asset":
+        data["asset_id"] = "other"
+    elif damage == "params":
+        data["params"]["min_pause_s"] = -1
+    elif damage == "interval":
+        data["pauses"][0]["end_s"] = 0.5
+    elif damage == "nonfinite":
+        data["pauses"][0]["end_s"] = float("inf")
+    content = {"json": b"{", "encoding": b"\xff"}.get(damage, json.dumps(data).encode())
+    cache_path = tmp_path / "pauses" / "asset.json"
+    cache_path.parent.mkdir()
+    cache_path.write_bytes(content)
+    calls = []
+
+    def detect(path: str, params: PauseParams) -> list[Pause]:
+        calls.append(path)
+        return [Pause(2, 2.6)]
+
+    monkeypatch.setattr(pause_module, "detect_pauses", detect)
+    assert analyze_pauses(pause_asset, tmp_path) == [Pause(2, 2.6)]
+    assert calls == [pause_asset.proxy_path]
+    assert analyze_pauses(pause_asset, tmp_path) == [Pause(2, 2.6)]
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("has_audio", [True, False])
+def test_pipeline_refreshes_legacy_shots_and_writes_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pause_asset: MediaAsset, has_audio: bool
+) -> None:
+    from vlogcut import analyze as analyze_module
+    from vlogcut.analyze import quality
+    from vlogcut.analyze.shots import ShotSpan
+
+    pause_asset.has_audio = has_audio
+    spans = [
+        ShotSpan(shot_id=f"asset_{i}", asset_id="asset", start_s=start, end_s=end)
+        for i, (start, end) in enumerate([(0, 4), (4, 8)])
+    ]
+    shots = [
+        Shot(**span.model_dump(), quality=QualityFlags(sharpness=100, exposure_clip=0, shake=0))
+        for span in spans
+    ]
+    workspace = tmp_path / "ws"
+    quality_path = workspace / "shots" / "asset.quality.json"
+    quality_path.parent.mkdir(parents=True)
+    cache = quality.QualityCache(
+        asset_id="asset", params=quality.QualityParams(),
+        spans=[(s.shot_id, s.start_s, s.end_s) for s in spans], shots=shots,
+    ).model_dump(mode="json")  # fmt: skip
+    for shot in cache["shots"]:
+        del shot["cut_points"]  # simulate a quality cache from before cut points existed
+    quality_path.write_text(json.dumps(cache), encoding="utf-8")
+    monkeypatch.setattr(analyze_module, "detect_shots", lambda *args: spans)
+    monkeypatch.setattr(quality, "measure_shot", lambda *args: pytest.fail("re-measured"))
+    calls = []
+
+    def detect(path: str, params: PauseParams) -> list[Pause]:
+        assert has_audio, "no-audio assets must not decode"
+        calls.append(path)
+        return [Pause(mid - 0.04, mid + 0.04) for mid in [2, 0.05, 3.95, 1, 1, 4.05]]
+
+    monkeypatch.setattr(pause_module, "detect_pauses", detect)
+    monkeypatch.setattr(pipeline, "ingest", lambda *args: ([pause_asset], []))
+    (tmp_path / "source.mp4").touch()
+    progress: list[str] = []
+    expected = [CutPoint(time_s=t, kind="pause") for t in [1, 2]] if has_audio else []
+    for _ in range(2):
+        result = pipeline.cut(
+            tmp_path, workspace, target_s=6, render=False, progress=progress.append
+        )
+        assert [s.cut_points for s in result.shots] == [expected, []]
+        saved = json.loads((workspace / "shots.json").read_text(encoding="utf-8"))
+        assert [Shot.model_validate(s) for s in saved] == result.shots
+    assert calls == ([pause_asset.proxy_path] if has_audio else [])
+    assert "[1/1] pauses source.mp4" in progress
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.scenedetect
+@needs_numpy
+def test_pipeline_finds_generated_audio_pause(
+    tmp_path: Path, make_clip: Callable[..., Path]
+) -> None:
+    from vlogcut.ingest import probe_asset
+
+    source = make_clip(duration=2.6, size="64x64", fps=25)
+    proxy = tmp_path / "pause.mp4"
+    ffmpeg.run(
+        "ffmpeg",
+        ["-v", "error", "-y", "-i", str(source), "-c:v", "copy",
+         "-af", "volume=0:enable='between(t,1,1.6)'", "-c:a", "aac", str(proxy)],
+    )  # fmt: skip
+    asset = probe_asset(proxy).model_copy(update={"proxy_path": str(proxy)})
+    shots = pipeline.analyze([asset], tmp_path / "ws")
+    points = [point for shot in shots for point in shot.cut_points]
+    assert len(points) == 1
+    assert points[0].kind == "pause"
+    assert points[0].time_s == pytest.approx(1.3, abs=0.1)
