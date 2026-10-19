@@ -205,8 +205,19 @@ Defined in `src/vlogcut/schemas.py`:
 | `Shot` (+ `QualityFlags`) | analyze | plan, validate, render |
 | `StyleProfile` | style | plan, validate, feedback |
 | `EDL` (+ `Clip`, `Transition`, `MusicCue`) | plan | validate, render |
+| `Feedback`, `PreferencePair` | feedback | ranker / feedback role |
 
 Changing a schema means updating this file and the tests in the same change.
+
+`Feedback` records `variant_id: str`, `verdict: "pick" | "reject" | None = None`
+and free-form `text: str = ""`. The ID must be non-empty after stripping whitespace;
+at least a verdict or non-blank text is required. `variant_id` identifies an EDL
+file stem, such as `coverage_180s_fast`, until the `Run` manifest exists.
+`PreferencePair` records `context: str` (project/brief description, possibly empty),
+`chosen: str` and `rejected: str` (variant IDs). Both IDs must be non-empty after
+stripping whitespace, and `chosen != rejected`. Supplied strings are preserved.
+These contracts prepare the feedback loop to be logged from its first real use;
+file persistence and downstream consumers remain planned.
 
 `Shot.cut_points` holds code-proposed `CutPoint(time_s, kind)` candidates at absolute
 source-asset times, on the same timeline as `Shot.start_s` and `end_s`. Times must be
@@ -244,7 +255,6 @@ Planned additions (not yet in `schemas.py`; each lands with the module that need
 | `Shot.kind` (talking / broll) | structure dimension |
 | `StyleProfile.structure`, `.cold_open_clips` | the "grammar" dimensions |
 | `Run` manifest (inputs fingerprint → outputs) | EDL file names collide once profile version, brief, variant and model all vary |
-| `Feedback`, `PreferencePair` | the flywheel must be logged from the first real use |
 
 Cached JSON should store paths relative to the workspace so a moved workspace stays
 valid (today they are absolute).
@@ -317,6 +327,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 5 · feedback: Feedback / PreferencePair contracts and pair derivation (schemas.py, feedback/pairs.py)
 - [x] Week 4 · pipeline: optional thread pool for per-asset analysis (pipeline.py, cli.py)
 - [x] Week 4 · plan: opt-in LLM planner wired into pipeline.cut and CLI (pipeline.py, cli.py)
 - [x] Week 4 · plan: LLM repair loop feeding violations back to the planner (plan/llm.py)
@@ -842,6 +853,18 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   cache paths when duplicate content has the same asset ID. Cache formats and keys
   are unchanged; shots, EDL, violations JSON and cache outputs are identical
   regardless of worker count. No schema change or new dependency.
+
+- 2026-11-08: feedback — **schema change**: `Feedback` stores a non-blank variant ID
+  (an EDL stem until the Run manifest exists), an optional pick/reject verdict and
+  free text; a verdict or non-blank text is required. `PreferencePair` stores context
+  (possibly empty) and distinct, non-blank chosen/rejected variant IDs.
+  `feedback/pairs.preference_pairs` derives pairs from one run's explicit verdicts:
+  ignore text-only entries, deduplicate identical verdicts in first-occurrence order,
+  and raise a one-line `ValueError` naming a variant with conflicting verdicts.
+  Emit every pick × reject, picks outermost and rejects innermost in their respective
+  first-occurrence order, propagating context without mutating inputs. Missing picks
+  or rejects yield an empty list. No pipeline/CLI wiring, HTML variants page,
+  feedback-role classification or ranker yet.
 
 ## Open questions
 
