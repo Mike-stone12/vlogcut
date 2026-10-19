@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from vlogcut.ingest import ProbeError, make_proxy, probe_asset
 from vlogcut.llm.router import ModelRouter
+from vlogcut.paths import to_workspace_relative
 from vlogcut.schemas import EDL, MediaAsset, MusicCue, Shot, StyleProfile
 from vlogcut.validate import Violation, repair_edl, validate_edl
 
@@ -253,7 +254,7 @@ def cut(
         raise ValueError('planner="llm" requires a ModelRouter')
     if caption and router is None:
         raise ValueError("caption=True requires a ModelRouter")
-    workspace = Path(workspace)
+    workspace = Path(workspace).resolve()
     if music is not None and not music.is_file():
         raise FileNotFoundError(f"music file does not exist or is not a file: {music}")
     # read the profile first: a bad file should fail before minutes of analysis
@@ -328,8 +329,15 @@ def cut(
         temp.replace(edl_path)
         violations = validate_and_write(edl, shots, edl_path, target_s=target_s, profile=profile)
     shots_path = workspace / "shots.json"
+    stored = [
+        {
+            **s.model_dump(mode="json"),
+            "keyframes": [to_workspace_relative(k, workspace) for k in s.keyframes],
+        }
+        for s in shots
+    ]
     shots_path.write_text(
-        json.dumps([s.model_dump(mode="json") for s in shots], ensure_ascii=False, indent=1),
+        json.dumps(stored, ensure_ascii=False, indent=1),
         encoding="utf-8",
     )
 

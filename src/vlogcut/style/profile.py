@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from vlogcut.analyze import shots, transitions
 from vlogcut.ingest import make_proxy, probe_asset
+from vlogcut.paths import from_workspace, to_workspace_relative
 from vlogcut.schemas import DurationStats, StructureStats, StyleProfile, TransitionMix
 
 log = logging.getLogger(__name__)
@@ -45,7 +46,9 @@ class ReferenceCuts(BaseModel):
     """Raw cut times of one reference; cached, since detection is the expensive step."""
 
     asset_id: str
-    source: str  # the path as given, for `StyleProfile.source_refs`
+    # Path as given (for StyleProfile.source_refs); workspace-relative in cache JSON
+    # when it lies inside the workspace.
+    source: str
     duration_s: float = Field(gt=0)
     params: ReferenceParams
     cuts: list[float]  # hard cuts + dissolve midpoints, seconds
@@ -264,10 +267,10 @@ def analyze_reference(
 ) -> ReferenceCuts:
     """Cut times of one reference (cached by asset fingerprint + params)."""
     params = params or ReferenceParams()
-    workspace = Path(workspace)
+    workspace = Path(workspace).resolve()
     asset = make_proxy(probe_asset(path), workspace)
     cache_path = workspace / "style" / f"{asset.asset_id}.cuts.json"
-    cached = _load_cache(cache_path, asset.asset_id, params)
+    cached = _load_cache(cache_path, asset.asset_id, params, workspace)
     if cached is not None:
         log.debug("reusing reference cuts %s", cache_path)
         return cached.model_copy(update={"source": str(path)})
@@ -297,7 +300,8 @@ def analyze_reference(
     )  # fmt: skip
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = cache_path.with_suffix(".part")
-    tmp.write_text(record.model_dump_json(indent=1), encoding="utf-8")
+    stored = record.model_copy(update={"source": to_workspace_relative(record.source, workspace)})
+    tmp.write_text(stored.model_dump_json(indent=1), encoding="utf-8")
     tmp.replace(cache_path)
     return record
 
@@ -332,7 +336,9 @@ def load_profile(path: str | Path) -> StyleProfile:
         raise StyleError(f"invalid style profile {path}: {where}: {first['msg']}") from exc
 
 
-def _load_cache(path: Path, asset_id: str, params: ReferenceParams) -> ReferenceCuts | None:
+def _load_cache(
+    path: Path, asset_id: str, params: ReferenceParams, workspace: Path
+) -> ReferenceCuts | None:
     if not path.is_file():
         return None
     try:
@@ -341,4 +347,5 @@ def _load_cache(path: Path, asset_id: str, params: ReferenceParams) -> Reference
         return None
     if record.asset_id != asset_id or record.params != params:
         return None
+    record.source = str(from_workspace(record.source, workspace))
     return record

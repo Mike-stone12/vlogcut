@@ -411,7 +411,8 @@ def test_cut_captions_and_cache_preserve_planning_and_default_outputs(
         assert result.shots[0].cut_points == baseline.shots[0].cut_points
         assert result.shots[0].cut_points[0].time_s == 1.5
         assert json.loads(paths[0].read_text(encoding="utf-8")) == [
-            s.model_dump(mode="json") for s in result.shots
+            {**s.model_dump(mode="json"), "keyframes": ["frame.jpg"] if s.keyframes else []}
+            for s in result.shots
         ]
         assert [path.read_bytes() for path in paths[1:]] == before[1:]
         if first_bytes is not None:

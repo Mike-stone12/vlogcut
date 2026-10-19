@@ -332,8 +332,12 @@ Planned additions (remaining fields land with the module that needs them):
 | `StyleProfile.structure` | exists with `montage_share` and `intro_pace_ratio`; talking/b-roll alternation, intro length and cold-open measurement remain planned |
 | `Run` manifest (inputs fingerprint → outputs) | EDL file names collide once profile version, brief, variant and model all vary |
 
-Cached JSON should store paths relative to the workspace so a moved workspace stays
-valid (today they are absolute).
+Cached JSON stores paths inside the workspace as relative POSIX strings, so a moved
+workspace stays valid. External source paths stay absolute. Cache readers resolve
+relative paths against the current workspace and preserve legacy absolute paths.
+In-memory media and keyframe paths remain absolute strings with unchanged schema
+types. Reference analysis preserves the supplied source string for
+`ReferenceCuts.source` and `StyleProfile.source_refs` on both cache misses and hits.
 
 ## Model roles
 
@@ -403,6 +407,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · cache: workspace-relative paths in cached JSON (paths.py, analyze/shots.py, analyze/quality.py, style/profile.py, pipeline.py)
 - [x] Week 5 · feedback: CLI classify subcommand applying profile deltas (cli.py)
 - [x] Week 3 · structure: rules planner produces montage bursts from montage_share (plan/rules.py)
 - [x] Week 3 · music: --music CLI flag for beat snapping (cli.py)
@@ -474,6 +479,18 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: portable workspace caches — `paths.py` converts paths only at JSON
+  read/write boundaries. Shot-span and quality caches store `keyframes` relative
+  to the workspace; the pipeline's `shots.json` snapshot uses the same format.
+  Reference-cut caches store internal `source` paths relatively and external sources
+  absolutely. Readers restore absolute strings before file checks or downstream use;
+  old absolute-path caches still qualify as hits without migration or key changes.
+  Reference analysis keeps the caller's source string for profile provenance on
+  both misses and hits. The pipeline's `shots.json` snapshot has no reader yet.
+  Ingest stores proxy media but no JSON; caption and pause caches contain no paths.
+  Schema types, EDL output and the planned Run manifest are unchanged. Offline tests
+  rename a populated workspace and fail if detection or quality analysis runs again.
 
 - 2026-10-19: feedback classification CLI — `feedback classify` loads feedback and
   style JSON through the existing loaders, then builds `ModelRouter.from_yaml` just

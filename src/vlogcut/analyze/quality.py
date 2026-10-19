@@ -26,6 +26,7 @@ from vlogcut.analyze.pauses import _load_mono_pcm
 from vlogcut.analyze.shots import ShotSpan
 from vlogcut.ingest import ffmpeg
 from vlogcut.ingest.proxy import proxy_dims, proxy_rate
+from vlogcut.paths import from_workspace, to_workspace_relative
 from vlogcut.schemas import MediaAsset, QualityFlags, Shot
 
 if TYPE_CHECKING:
@@ -346,6 +347,8 @@ def assess_shots(
         try:
             cache = QualityCache.model_validate_json(cache_path.read_text(encoding="utf-8"))
             if cache.params == params and cache.spans == key:
+                for shot in cache.shots:
+                    shot.keyframes = [str(from_workspace(k, workspace)) for k in shot.keyframes]
                 return cache.shots
         except (ValidationError, ValueError):
             pass
@@ -368,7 +371,13 @@ def assess_shots(
         )
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = cache_path.with_suffix(".part")
-    cache = QualityCache(asset_id=asset.asset_id, params=params, spans=key, shots=shots)
+    stored = [
+        s.model_copy(
+            update={"keyframes": [to_workspace_relative(k, workspace) for k in s.keyframes]}
+        )
+        for s in shots
+    ]
+    cache = QualityCache(asset_id=asset.asset_id, params=params, spans=key, shots=stored)
     tmp.write_text(cache.model_dump_json(indent=1), encoding="utf-8")
     tmp.replace(cache_path)
     return shots

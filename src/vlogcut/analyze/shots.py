@@ -19,6 +19,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, ValidationError
 
 from vlogcut.ingest import ffmpeg
+from vlogcut.paths import from_workspace, to_workspace_relative
 from vlogcut.schemas import MediaAsset
 
 log = logging.getLogger(__name__)
@@ -150,9 +151,9 @@ def detect_shots(
     params = params or ShotParams()
     if asset.proxy_path is None:
         raise ShotDetectionError(f"{asset.path}: no proxy; run ingest.make_proxy first")
-    workspace = Path(workspace)
+    workspace = Path(workspace).resolve()
     cache_path = workspace / "shots" / f"{asset.asset_id}.json"
-    cached = _load_cache(cache_path, asset, params)
+    cached = _load_cache(cache_path, asset, params, workspace)
     if cached is not None:
         log.debug("reusing shots %s", cache_path)
         return cached
@@ -185,15 +186,23 @@ def detect_shots(
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = cache_path.with_suffix(".part")
+    stored = [
+        s.model_copy(
+            update={"keyframes": [to_workspace_relative(k, workspace) for k in s.keyframes]}
+        )
+        for s in spans
+    ]
     tmp.write_text(
-        ShotCache(asset_id=asset.asset_id, params=params, spans=spans).model_dump_json(indent=1),
+        ShotCache(asset_id=asset.asset_id, params=params, spans=stored).model_dump_json(indent=1),
         encoding="utf-8",
     )
     tmp.replace(cache_path)
     return spans
 
 
-def _load_cache(path: Path, asset: MediaAsset, params: ShotParams) -> list[ShotSpan] | None:
+def _load_cache(
+    path: Path, asset: MediaAsset, params: ShotParams, workspace: Path
+) -> list[ShotSpan] | None:
     if not path.is_file():
         return None
     try:
@@ -202,6 +211,8 @@ def _load_cache(path: Path, asset: MediaAsset, params: ShotParams) -> list[ShotS
         return None
     if cache.asset_id != asset.asset_id or cache.params != params:
         return None
+    for span in cache.spans:
+        span.keyframes = [str(from_workspace(k, workspace)) for k in span.keyframes]
     if not all(Path(k).is_file() for s in cache.spans for k in s.keyframes):
         return None
     return cache.spans
