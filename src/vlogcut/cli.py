@@ -37,10 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("-s", "--strategy", choices=["coverage", "highlights"], default="coverage")
     c.add_argument("--style", type=Path, help="style profile JSON from `vlogcut style build`")
     c.add_argument("--planner", choices=["rules", "llm"], default="rules")
+    c.add_argument("--caption", action="store_true", help="caption shots using the captioner role")
     c.add_argument("--brief", help="text brief for the LLM planner")
     c.add_argument(
         "--config", type=Path, default=Path("config.yaml"),
-        help="model router config (only read with --planner llm; default config.yaml)",
+        help="model router config (read with --planner llm or --caption; default config.yaml)",
     )  # fmt: skip
     c.add_argument("-w", "--workspace", type=Path, help="cache dir (default ./workspace/<folder>)")
     c.add_argument("-o", "--out", type=Path, help="preview path (default inside the workspace)")
@@ -113,15 +114,17 @@ def _cut(args: argparse.Namespace) -> int:
     if args.style is not None and not args.style.is_file():
         return _fail(f"style profile not found: {args.style}")
     router = None
-    if args.planner == "llm":
+    if args.planner == "llm" or args.caption:
         from yaml import YAMLError
 
         from vlogcut.llm.router import ModelRouter
 
         try:
             router = ModelRouter.from_yaml(args.config)
-            if "planner" not in router.roles:
+            if args.planner == "llm" and "planner" not in router.roles:
                 raise ValueError("missing planner role")
+            if args.caption and "captioner" not in router.roles:
+                raise ValueError("missing captioner role")
         except (
             OSError,
             UnicodeError,
@@ -145,7 +148,7 @@ def _cut(args: argparse.Namespace) -> int:
         result = cut(
             args.folder, workspace,
             target_s=args.target, strategy=args.strategy, style=args.style, music=args.music,
-            planner=args.planner, router=router, brief=args.brief,
+            planner=args.planner, router=router, caption=args.caption, brief=args.brief,
             music_gain_db=args.music_gain, out=args.out, render=not args.no_render,
             preview_params={"background": args.background, "subtitles": not args.no_subtitles},
             progress=progress, workers=args.jobs,
@@ -164,6 +167,8 @@ def _cut(args: argparse.Namespace) -> int:
     for name, why in result.skipped:
         print(f"skipped   {name}: {why}")
     print(f"shots     {len(result.shots)} ({len(result.shots) - usable} rejected)")
+    if args.caption:
+        print(f"captioned {sum(s.caption is not None for s in result.shots)} shots")
     if result.profile is not None:
         print(f"style     {args.style.name}: {result.profile.notes}")
     print(f"cut       {len(result.edl.clips)} clips, {result.edl.total_duration_s:.1f} s")

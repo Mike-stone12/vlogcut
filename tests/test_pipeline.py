@@ -43,7 +43,10 @@ def _router(tmp_path: Path, client: FakeClient) -> ModelRouter:
     return ModelRouter(
         {
             "providers": {"fake": {"base_url": "http://fake/v1"}},
-            "roles": {"planner": {"provider": "fake", "model": "test-planner"}},
+            "roles": {
+                "planner": {"provider": "fake", "model": "test-planner"},
+                "captioner": {"provider": "fake", "model": "test-captioner"},
+            },
         },
         log_path=tmp_path / "calls.jsonl",
         client_factory=lambda _: client,
@@ -82,6 +85,109 @@ def _assets() -> list[MediaAsset]:
         )
         for i in range(3)
     ]  # fmt: skip
+
+
+@pytest.fixture
+def caption_analysis(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[MediaAsset]:
+    assets = _assets()[:1]
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"tiny fake JPEG")
+
+    def detect(*args: object) -> list[Shot]:
+        return [
+            _shots()[0].model_copy(
+                update={
+                    "shot_id": f"s{i}", "asset_id": assets[0].asset_id,
+                    "start_s": i * 3, "end_s": (i + 1) * 3,
+                    "keyframes": [str(frame)] if i < 2 else [],
+                },
+                deep=True,
+            )
+            for i in range(3)
+        ]  # fmt: skip
+
+    def assess(asset: MediaAsset, shots: list[Shot], workspace: Path) -> list[Shot]:
+        shots[1].quality.rejected = True
+        return shots
+
+    monkeypatch.setattr(pipeline, "find_footage", lambda folder: [Path(assets[0].path)])
+    monkeypatch.setattr(pipeline, "ingest", lambda *a, **k: (assets, []))
+    monkeypatch.setattr("vlogcut.analyze.detect_shots", detect)
+    monkeypatch.setattr("vlogcut.analyze.assess_shots", assess)
+    monkeypatch.setattr(pauses, "analyze_pauses", lambda *a: [pauses.Pause(1, 2)])
+    return assets
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_cut_captions_and_cache_preserve_planning_and_default_outputs(
+    tmp_path: Path, caption_analysis: list[MediaAsset], workers: int
+) -> None:
+    client = FakeClient(['{"description":"Coffee","tags":["cafe"],"interest":4}'])
+    router = _router(tmp_path, client)
+    baseline = pipeline.cut(tmp_path, tmp_path, target_s=3, render=False, workers=workers)
+    paths = [
+        tmp_path / "shots.json", baseline.edl_path,
+        baseline.edl_path.with_suffix(".violations.json"),
+    ]  # fmt: skip
+    before = [path.read_bytes() for path in paths]
+    assert not (tmp_path / "captions").exists()
+    first_bytes = None
+    for _ in range(2):
+        result = pipeline.cut(
+            tmp_path, tmp_path, target_s=3, render=False, workers=workers,
+            caption=True, router=router,
+        )  # fmt: skip
+        assert len(client.requests) == 1
+        assert client.requests[0]["model"] == "test-captioner"
+        assert [s.caption for s in result.shots] == ["Coffee", None, None]
+        assert result.shots[0].tags == ["cafe"] and result.shots[0].interest == 4
+        assert result.shots[0].cut_points == baseline.shots[0].cut_points
+        assert result.shots[0].cut_points[0].time_s == 1.5
+        assert json.loads(paths[0].read_text(encoding="utf-8")) == [
+            s.model_dump(mode="json") for s in result.shots
+        ]
+        assert [path.read_bytes() for path in paths[1:]] == before[1:]
+        if first_bytes is not None:
+            assert paths[0].read_bytes() == first_bytes
+        first_bytes = paths[0].read_bytes()
+    cache = json.loads((tmp_path / "captions" / "s0.json").read_text(encoding="utf-8"))
+    assert cache["key"]["model"] == "test-captioner"
+    assert len(list((tmp_path / "captions").glob("*.json"))) == 1
+    calls = [json.loads(line) for line in router.log_path.read_text().splitlines()]
+    assert [call["role"] for call in calls] == ["captioner"]
+    for options in ({}, {"caption": False}):
+        pipeline.cut(
+            tmp_path, tmp_path, target_s=3, render=False, workers=workers,
+            router=router, **options,
+        )  # fmt: skip
+        assert len(client.requests) == 1
+        assert [path.read_bytes() for path in paths] == before
+
+
+def test_analyze_returns_captions(tmp_path: Path, caption_analysis: list[MediaAsset]) -> None:
+    client = FakeClient(['{"description":"Coffee","tags":["cafe"],"interest":4}'])
+    shots = pipeline.analyze(
+        caption_analysis, tmp_path, caption=True, router=_router(tmp_path, client)
+    )
+    assert [s.caption for s in shots] == ["Coffee", None, None]
+    assert shots[0].tags == ["cafe"] and shots[0].interest == 4
+
+
+def test_caption_requires_router_before_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unexpected(*args: object, **kwargs: object) -> None:
+        pytest.fail("started analysis")
+
+    monkeypatch.setattr(pipeline, "find_footage", unexpected)
+    monkeypatch.setattr("vlogcut.analyze.detect_shots", unexpected)
+    for call in (
+        lambda: pipeline.cut(tmp_path, tmp_path, caption=True),
+        lambda: pipeline.analyze(_assets(), tmp_path, caption=True),
+    ):
+        with pytest.raises(ValueError, match="caption=True requires a ModelRouter"):
+            call()
+    assert not list(tmp_path.iterdir())
 
 
 def test_parallel_analysis_preserves_outputs_and_caches(
