@@ -12,6 +12,30 @@ from vlogcut.schemas import EDL, Clip, DurationStats, QualityFlags, Shot, StyleP
 from vlogcut.validate import Violation
 
 
+@pytest.mark.parametrize(
+    "payload", [None, b"{", b"{}", b'"text"', b"null", b"[1]", b"[null]", b'["valid", {}]', b"\xff"]
+)
+@pytest.mark.parametrize("planner", ["rules", "llm"])
+def test_bad_constraints_fail_before_cut(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    payload: bytes | None,
+    planner: str,
+) -> None:
+    path = tmp_path / "constraints.json"
+    if payload is not None:
+        path.write_bytes(payload)
+    monkeypatch.setattr("vlogcut.pipeline.cut", lambda *a, **kw: pytest.fail("started cut"))
+    monkeypatch.setattr(ModelRouter, "from_yaml", lambda *a: pytest.fail("loaded config"))
+    assert cli.main(["cut", "day", "--planner", planner, "--constraints", str(path)]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert len(captured.err.splitlines()) == 1
+    assert captured.err.startswith("vlogcut: error:")
+    assert str(path) in captured.err
+
+
 def test_find_footage_filters_and_sorts(tmp_path):
     for name in ["b.MOV", "a.mp4", "c.MKV", ".hidden.mp4", "photo.JPG", "notes.txt"]:
         (tmp_path / name).write_bytes(b"x")

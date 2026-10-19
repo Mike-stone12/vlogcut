@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -44,6 +45,21 @@ class FeedbackClassification(BaseModel):
 
 class FeedbackClassificationError(ValueError):
     """Feedback has no text or the model reply violates the classification contract."""
+
+
+def load_constraints(path: str | Path) -> list[str]:
+    """Load the ordered JSON string list written by feedback classify --constraints-out."""
+    path = Path(path)
+    try:
+        constraints = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(constraints, list) or any(
+            not isinstance(text, str) for text in constraints
+        ):
+            raise ValueError("expected a JSON list of strings")
+    except (OSError, ValueError) as exc:
+        detail = " ".join(f"invalid constraints {path}: {exc}".split())
+        raise ValueError(detail) from exc
+    return constraints
 
 
 def build_feedback_messages(

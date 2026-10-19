@@ -7,9 +7,10 @@ from typing import Any
 
 import pytest
 
-from vlogcut import cli
+from vlogcut import cli, pipeline
+from vlogcut.feedback.classify import load_constraints
 from vlogcut.llm.router import ModelRouter
-from vlogcut.schemas import DurationStats, StyleProfile
+from vlogcut.schemas import DurationStats, MediaAsset, QualityFlags, Shot, StyleProfile
 from vlogcut.style import load_profile
 
 
@@ -101,6 +102,55 @@ def test_delta_output(
     assert captured.err == ""
     assert len(client.requests) == 1 and client.requests[0]["model"] == "m-feedback"
     assert json.loads((tmp_path / "calls.jsonl").read_text())["role"] == "feedback"
+
+
+@pytest.mark.parametrize("constraints", [[], ["Lengthen the café part", "Keep camera audio"]])
+def test_constraints_round_trip_into_cut(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    inputs: tuple[Path, Path],
+    caplog: pytest.LogCaptureFixture,
+    constraints: list[str],
+) -> None:
+    feedback, _ = inputs
+    feedback.write_text(
+        json.dumps([{"variant_id": "v1", "text": constraint} for constraint in constraints]),
+        encoding="utf-8",
+    )
+    stub_router(
+        tmp_path,
+        monkeypatch,
+        [json.dumps({"scope": "edit", "constraint": constraint}) for constraint in constraints],
+    )
+    path = tmp_path / "constraints.json"
+    assert cli.main(command(inputs) + ["--constraints-out", str(path)]) == 0
+    assert load_constraints(path) == constraints
+    asset = MediaAsset(asset_id="a", path="a.mp4", duration_s=10, fps=30, width=320, height=240)
+    monkeypatch.setattr(pipeline, "find_footage", lambda folder: [Path(asset.path)])
+    monkeypatch.setattr(pipeline, "ingest", lambda *a: ([asset], []))
+    shot = Shot(
+        shot_id="s", asset_id="a", start_s=0, end_s=10,
+        quality=QualityFlags(sharpness=200, exposure_clip=0, shake=0),
+    )  # fmt: skip
+    monkeypatch.setattr(pipeline, "analyze", lambda *a: [shot])
+    assert (
+        cli.main(
+            [
+                "cut",
+                "day",
+                "-w",
+                str(tmp_path),
+                "-t",
+                "3",
+                "--no-render",
+                "--constraints",
+                str(path),
+            ]
+        )
+        == 0
+    )
+    notices = [r.message for r in caplog.records if "constraints" in r.message]
+    assert notices == (["Edit constraints are ignored by the rules planner"] if constraints else [])
 
 
 @pytest.mark.parametrize("write_constraints", [False, True])

@@ -197,8 +197,12 @@ def test_messages_allow_cold_open(shots: list[Shot], structure: StructureStats |
 
 @pytest.mark.parametrize("profile_given", [False, True])
 @pytest.mark.parametrize("dissolve_share", [None, 0.0, 0.25])
+@pytest.mark.parametrize("constraints", [None, [], ["", " \t\n"]])
 def test_unmeasured_profile_preserves_original_prompt_bytes(
-    shots: list[Shot], profile_given: bool, dissolve_share: float | None
+    shots: list[Shot],
+    profile_given: bool,
+    dissolve_share: float | None,
+    constraints: list[str] | None,
 ) -> None:
     profile = None
     pacing = "No style profile."
@@ -218,7 +222,7 @@ def test_unmeasured_profile_preserves_original_prompt_bytes(
             if dissolve_share is None
             else f" Dissolve share={dissolve_share}."
         )
-    messages = build_planner_messages(shots, target_s=10, profile=profile)
+    messages = build_planner_messages(shots, target_s=10, profile=profile, constraints=constraints)
     # Captured from the original system prompt before adding structure guidance.
     assert hashlib.sha256(messages[0]["content"].encode("utf-8")).hexdigest() == (
         "a9923fc0954efa03f365e943650429602202bfa058be3b3b66612d9362f7394b"
@@ -230,6 +234,37 @@ def test_unmeasured_profile_preserves_original_prompt_bytes(
     assert messages[1]["content"].encode("utf-8") == expected_user.encode("utf-8")
     for wording in ("montage", "Intro pace", "first 20 s", "Cold open"):
         assert wording not in str(messages)
+
+
+def test_constraints_are_ordered_and_one_per_line(shots: list[Shot]) -> None:
+    constraints = ["  Lengthen the café part  ", "", " \t\n", "Keep the\narrival"]
+    messages = build_planner_messages(shots, target_s=10, constraints=constraints)
+    assert (
+        "Edit constraints from feedback on a previous cut (follow them where possible):\n"
+        "Lengthen the café part\nKeep the arrival\nShot table"
+    ) in messages[1]["content"]
+    assert messages[0] == build_planner_messages(shots, target_s=10)[0]
+    assert constraints == ["  Lengthen the café part  ", "", " \t\n", "Keep the\narrival"]
+
+
+@pytest.mark.parametrize("repair", [False, True])
+def test_planning_retains_constraints_once_in_conversation(
+    tmp_path: Path, shots: list[Shot], valid_json: str, repair: bool
+) -> None:
+    bad = json.loads(valid_json)
+    bad["clips"][0]["shot_id"] = "missing"
+    replies = ["not JSON", json.dumps(bad), valid_json] if repair else [valid_json]
+    router, client = make_router(tmp_path, replies)
+    planner = plan_with_repair if repair else plan_with_llm
+    planner(router, shots, target_s=10, constraints=["Lengthen the café part"])
+    assert len(client.requests) == (3 if repair else 1)
+    initial = client.requests[0]["messages"]
+    for request in client.requests:
+        messages = request["messages"]
+        assert messages[:2] == initial
+        conversation = "\n".join(message["content"] for message in messages)
+        assert conversation.count("Edit constraints from feedback") == 1
+        assert conversation.count("Lengthen the café part") == 1
 
 
 @pytest.mark.parametrize("wrapper", [" {} \n", "```json\n{}\n```", "\n```\r\n{}\r\n```\n"])

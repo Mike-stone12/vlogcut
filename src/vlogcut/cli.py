@@ -45,6 +45,10 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--caption", action="store_true", help="caption shots using the captioner role")
     c.add_argument("--brief", help="text brief for the LLM planner")
     c.add_argument(
+        "--constraints", type=Path, metavar="CONSTRAINTS_JSON",
+        help="edit constraints from feedback classify (LLM planner only)",
+    )  # fmt: skip
+    c.add_argument(
         "--config", type=Path, default=Path("config.yaml"),
         help="model router config (read with --planner llm or --caption; default config.yaml)",
     )  # fmt: skip
@@ -129,6 +133,14 @@ def _cut(args: argparse.Namespace) -> int:
     from vlogcut.render import RenderError
     from vlogcut.style import StyleError
 
+    constraints = None
+    if args.constraints is not None:
+        from vlogcut.feedback.classify import load_constraints
+
+        try:
+            constraints = load_constraints(args.constraints)
+        except ValueError as exc:
+            return _fail(str(exc))
     if args.music is not None and not args.music.is_file():
         return _fail(f"music file not found: {args.music}")
     if args.style is not None and not args.style.is_file():
@@ -171,7 +183,7 @@ def _cut(args: argparse.Namespace) -> int:
             planner=args.planner, router=router, caption=args.caption, brief=args.brief,
             music_gain_db=args.music_gain, out=args.out, render=not args.no_render,
             preview_params={"background": args.background, "subtitles": not args.no_subtitles},
-            progress=progress, workers=args.jobs, cold_open=args.cold_open,
+            progress=progress, workers=args.jobs, cold_open=args.cold_open, constraints=constraints,
         )  # fmt: skip
     except FFmpegNotFoundError as exc:
         return _fail(str(exc))

@@ -900,6 +900,40 @@ def test_cut_llm_fallback_preserves_rules_outputs(
     )
 
 
+@pytest.mark.parametrize("constraints", [None, [], [" \n"], ["Lengthen the café part"]])
+def test_rules_constraints_preserve_edl_and_warn_once(
+    tmp_path: Path,
+    stub_analysis: None,
+    caplog: pytest.LogCaptureFixture,
+    constraints: list[str] | None,
+) -> None:
+    baseline = pipeline.cut(tmp_path, tmp_path, target_s=3, render=False)
+    edl_bytes = baseline.edl_path.read_bytes()
+    report_bytes = baseline.edl_path.with_suffix(".violations.json").read_bytes()
+    caplog.clear()
+    result = pipeline.cut(tmp_path, tmp_path, target_s=3, render=False, constraints=constraints)
+    assert result.edl_path.read_bytes() == edl_bytes
+    assert result.edl_path.with_suffix(".violations.json").read_bytes() == report_bytes
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == int(any(text.strip() for text in constraints or ()))
+    if warnings:
+        assert warnings[0].message == "Edit constraints are ignored by the rules planner"
+
+
+def test_cut_forwards_constraints_to_llm(tmp_path: Path, stub_analysis: None) -> None:
+    client = FakeClient([_edl().model_dump_json()])
+    pipeline.cut(
+        tmp_path,
+        tmp_path,
+        target_s=1,
+        render=False,
+        planner="llm",
+        router=_router(tmp_path, client),
+        constraints=["Keep the arrival", "Keep camera audio"],
+    )
+    assert "Keep the arrival\nKeep camera audio\n" in client.requests[0]["messages"][1]["content"]
+
+
 def test_cut_llm_requires_router_before_analysis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

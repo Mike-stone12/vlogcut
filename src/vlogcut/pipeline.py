@@ -234,6 +234,7 @@ def cut(
     router: ModelRouter | None = None,
     caption: bool = False,
     brief: str | None = None,
+    constraints: Sequence[str] | None = None,
     max_repair_rounds: int = 2,
     music: Path | None = None,
     music_gain_db: float = -14.0,
@@ -282,7 +283,7 @@ def cut(
         try:
             planned = plan_with_repair(
                 router, shots, target_s=target_s, profile=profile, brief=brief,
-                max_rounds=max_repair_rounds,
+                max_rounds=max_repair_rounds, constraints=constraints,
             )  # fmt: skip
         except PlannerError as exc:
             log.warning("LLM planner failed; falling back to rules: %s", exc)
@@ -290,6 +291,8 @@ def cut(
         else:
             edl, repair_rounds = planned.edl, planned.rounds
     if used_planner == "rules":
+        if any(text.strip() for text in constraints or ()):
+            log.warning("Edit constraints are ignored by the rules planner")
         edl = rough_cut(
             shots, assets, RoughCutParams(target_s=target_s, strategy=strategy), profile,
             cold_open=cold_open,
