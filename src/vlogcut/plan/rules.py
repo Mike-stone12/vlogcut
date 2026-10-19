@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Callable, Mapping, Sequence
+from itertools import groupby
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -73,6 +74,29 @@ def score_shot(shot: Shot) -> float:
     if "kept_for_audio" in q.warnings:
         score += 0.3  # someone talking: usually the spine of a vlog
     return max(0.0, min(1.0, score))
+
+
+def _ranker_percentiles(
+    shot_ids: Sequence[str], ranker_scores: Mapping[str, float]
+) -> dict[str, float]:
+    """Rank finite scores among eligible IDs, with neutral defaults for missing IDs.
+
+    Divide zero-based average ranks by n - 1, giving [0, 1] percentiles.
+    A single scored shot gets 0.5; missing scores do not enter the ranking.
+    """
+    result = dict.fromkeys(shot_ids, 0.5)
+    scored = sorted(
+        (shot_id for shot_id in shot_ids if shot_id in ranker_scores),
+        key=ranker_scores.__getitem__,
+    )
+    if len(scored) > 1:
+        start = 0
+        for _, group in groupby(scored, key=ranker_scores.__getitem__):
+            tied = list(group)
+            percentile = (start + (len(tied) - 1) / 2) / (len(scored) - 1)
+            result.update(dict.fromkeys(tied, percentile))
+            start += len(tied)
+    return result
 
 
 def order_key(asset: MediaAsset | None) -> tuple:
@@ -440,10 +464,18 @@ def rough_cut(
     *,
     max_shift_s: float | None = 1.0,
     cold_open: bool = False,
+    ranker_scores: Mapping[str, float] | None = None,
 ) -> EDL:
     """Build a rough cut, shifting onto candidates by at most max_shift_s (None: unbounded).
 
     cold_open opts into moving one later hook when profile.cold_open_clips permits it.
+    Optional precomputed ranker_scores use higher = better. Known IDs must have
+    finite values (even rejected/too-short shots); unknown IDs are ignored.
+    Eligible scored candidates get within-table percentiles with average ranks
+    for ties; single and missing scores get 0.5. Blend 0.5 * score(shot) +
+    0.5 * percentile everywhere scores are used. score_shot already clamps to
+    [0, 1], so no further normalization is needed; custom scorers should use
+    that range when blending. None or empty scores preserve the original EDL.
     """
     params = params or RoughCutParams()
     pace = profile.shot_duration_s if profile else DEFAULT_PACING
@@ -452,6 +484,14 @@ def rough_cut(
     )
     montage = profile.structure.montage_share if profile is not None and profile.structure else None
     by_id = {a.asset_id: a for a in assets}
+
+    if ranker_scores:
+        ranker_scores = {
+            s.shot_id: ranker_scores[s.shot_id] for s in shots if s.shot_id in ranker_scores
+        }
+        for shot_id, value in ranker_scores.items():
+            if not math.isfinite(value):
+                raise ValueError(f"Ranker score for shot {shot_id!r} must be finite")
 
     ordered = sorted(shots, key=lambda s: (order_key(by_id.get(s.asset_id)), s.asset_id, s.start_s))
     cands = []
@@ -465,6 +505,13 @@ def rough_cut(
         raise RoughCutError(
             f"no usable shots: {len(shots)} shots, none unrejected with >= {pace.p10:.1f} s"
         )
+
+    if ranker_scores:
+        percentiles = _ranker_percentiles([c.shot.shot_id for c in cands], ranker_scores)
+        cands = [
+            c.model_copy(update={"score": 0.5 * c.score + 0.5 * percentiles[c.shot.shot_id]})
+            for c in cands
+        ]
 
     target, tol = params.target_s, params.tolerance
     k = max(1, round(target / expected_length(pace)))
