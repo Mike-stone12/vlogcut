@@ -1,10 +1,13 @@
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 from vlogcut import pipeline
+from vlogcut.llm.router import ModelRouter
 from vlogcut.schemas import (
     EDL,
     Clip,
@@ -17,6 +20,37 @@ from vlogcut.schemas import (
     TransitionMix,
 )
 from vlogcut.validate import validate_edl
+
+
+class FakeClient:
+    def __init__(self, outputs: list[str]) -> None:
+        self.outputs = list(outputs)
+        self.requests: list[dict[str, Any]] = []
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    def _create(self, **kwargs: Any) -> SimpleNamespace:
+        self.requests.append(kwargs)
+        message = SimpleNamespace(content=self.outputs.pop(0))
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None)
+
+
+def _router(tmp_path: Path, client: FakeClient) -> ModelRouter:
+    return ModelRouter(
+        {
+            "providers": {"fake": {"base_url": "http://fake/v1"}},
+            "roles": {"planner": {"provider": "fake", "model": "test-planner"}},
+        },
+        log_path=tmp_path / "calls.jsonl",
+        client_factory=lambda _: client,
+    )
+
+
+@pytest.fixture
+def stub_analysis(monkeypatch: pytest.MonkeyPatch) -> None:
+    asset = MediaAsset(asset_id="a", path="a.mp4", duration_s=10, fps=30, width=320, height=240)
+    monkeypatch.setattr(pipeline, "find_footage", lambda folder: [Path(asset.path)])
+    monkeypatch.setattr(pipeline, "ingest", lambda *args: ([asset], []))
+    monkeypatch.setattr(pipeline, "analyze", lambda *args: _shots())
 
 
 def _shots() -> list[Shot]:
@@ -214,3 +248,93 @@ def test_repair_if_needed_fixes_transitions(
     assert final_edl.clips[1].transition_in == expected
     assert validate_edl(final_edl, shots, profile, target_s=2) == []
     assert [(c.in_s, c.out_s) for c in final_edl.clips] == [(0, 1), (1, 2)]
+
+
+@pytest.mark.parametrize("styled", [False, True])
+@pytest.mark.parametrize("case", ["clean", "retry", "deterministic_repair"])
+def test_cut_llm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_analysis: None,
+    styled: bool,
+    case: str,
+) -> None:
+    valid = _edl()
+    bad = valid.model_copy(deep=True)
+    bad.clips.append(Clip(shot_id="missing", in_s=0, out_s=1))
+    replies = {
+        "clean": [valid.model_dump_json()],
+        "retry": [bad.model_dump_json(), valid.model_dump_json()],
+        "deterministic_repair": [bad.model_dump_json()],
+    }
+    client = FakeClient(replies[case])
+    router = _router(tmp_path, client)
+    style = tmp_path / "fast.json" if styled else None
+    if style:
+        profile = StyleProfile(
+            shot_duration_s=DurationStats(p10=1, median=1, p90=1), cuts_per_min=60
+        )
+        style.write_text(profile.model_dump_json(), encoding="utf-8")
+    stem = "coverage_1s" + ("_fast" if styled else "") + "_llm"
+    edl_path = tmp_path / "edl" / f"{stem}.json"
+    rendered: list[EDL] = []
+
+    def render_preview(edl: EDL, *args: object, **kwargs: object) -> None:
+        assert EDL.model_validate_json(edl_path.read_text(encoding="utf-8")) == edl
+        assert json.loads(edl_path.with_suffix(".violations.json").read_text()) == []
+        rendered.append(edl)
+
+    monkeypatch.setattr("vlogcut.render.render_preview", render_preview)
+    monkeypatch.setattr("vlogcut.plan.rough_cut", lambda *args: pytest.fail("unexpected rules"))
+    result = pipeline.cut(
+        tmp_path, tmp_path, target_s=1, planner="llm", router=router, style=style,
+        brief="A quiet morning", max_repair_rounds=0 if case == "deterministic_repair" else 2,
+    )  # fmt: skip
+    assert result.planner == "llm" and not result.fallback
+    assert result.repair_rounds == (1 if case == "retry" else 0)
+    assert result.repaired == (case == "deterministic_repair")
+    assert result.edl_path == edl_path
+    assert result.preview_path == tmp_path / f"preview_{stem}.mp4"
+    assert result.violations == [] and result.edl.clips == valid.clips
+    assert rendered == [result.edl]
+    assert len(client.requests) == result.repair_rounds + 1
+    prompt = client.requests[0]["messages"][-1]["content"]
+    assert "A quiet morning" in prompt and "Target duration: 1 seconds" in prompt
+    assert ("Profile pacing:" in prompt) == styled
+    if case == "retry":
+        assert "unknown_shot" in client.requests[1]["messages"][-1]["content"]
+
+
+def test_cut_llm_fallback_preserves_rules_outputs(
+    tmp_path: Path, stub_analysis: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    baseline = pipeline.cut(tmp_path, tmp_path, target_s=3, render=False)
+    edl_bytes = baseline.edl_path.read_bytes()
+    report_bytes = baseline.edl_path.with_suffix(".violations.json").read_bytes()
+    assert (baseline.planner, baseline.fallback, baseline.repair_rounds) == ("rules", False, 0)
+    client = FakeClient(["not JSON"] * 3)
+    result = pipeline.cut(
+        tmp_path,
+        tmp_path,
+        target_s=3,
+        render=False,
+        planner="llm",
+        router=_router(tmp_path, client),
+    )
+    assert (result.planner, result.fallback, result.repair_rounds) == ("rules", True, 0)
+    assert result.edl_path == baseline.edl_path == tmp_path / "edl" / "coverage_3s.json"
+    assert result.edl_path.read_bytes() == edl_bytes
+    assert result.edl_path.with_suffix(".violations.json").read_bytes() == report_bytes
+    assert len(client.requests) == 3
+    assert any(
+        r.levelname == "WARNING" and "falling back to rules" in r.message for r in caplog.records
+    )
+
+
+def test_cut_llm_requires_router_before_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pipeline, "find_footage", lambda *args: pytest.fail("scanned footage"))
+    monkeypatch.setattr(pipeline, "analyze", lambda *args: pytest.fail("analyzed footage"))
+    with pytest.raises(ValueError, match='planner="llm" requires a ModelRouter'):
+        pipeline.cut(tmp_path, tmp_path, planner="llm")

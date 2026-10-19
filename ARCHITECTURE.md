@@ -128,9 +128,10 @@ explainable, and it would break principle 2.
   when a fixed-length window fits within the usable part and the maximum shift
 - `plan/llm.py` provides deterministic prompt building and EDL parsing via
   `ModelRouter` with the `planner` role, plus a bounded repair loop feeding parse
-  errors and hard-check violations back into the same conversation. Neither the
-  LLM planner nor its repair loop is wired into the pipeline or CLI; the rules
-  planner stays the default.
+  errors and hard-check violations back into the same conversation. The LLM planner
+  and repair loop are opt-in via `pipeline.cut(planner="llm", router=...)` or
+  `vlogcut cut --planner llm`; the rules planner stays the default. The CLI reads
+  `--config` (default `config.yaml`) only for LLM planning and accepts `--brief`.
 - If the shot table is too long: two stages — pick segments, then pick shots per segment
 - `plan/rules.py` (+ ranker) is the no-model baseline and the fallback. The LLM planner
   becomes the default only once the eval shows it beats that baseline on style distance
@@ -161,8 +162,11 @@ explainable, and it would break principle 2.
   violations are kept. `CutResult.repaired` and an extra CLI line report applied
   repairs; clean EDLs are unchanged. The LLM repair loop now exists separately in
   `plan/llm.py`: structured errors are sent back to the planner for at most
-  `max_rounds` extra rounds, without calling deterministic repair. It is not wired
-  into the pipeline or CLI. Beat snapping integration remains planned.
+  `max_rounds` extra rounds, without calling deterministic repair. It runs before
+  this validation/repair/render flow with `--planner llm` (two extra rounds by
+  default). If no reply parses, a warning is logged and rules planning takes over;
+  every resulting EDL goes through the same checks and deterministic repair.
+  Beat snapping integration remains planned.
 
 ### 6. Render / export
 - Preview mp4 (`render/preview.py`): FFmpeg on proxies (fast, low-res); cached clip
@@ -313,6 +317,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · plan: opt-in LLM planner wired into pipeline.cut and CLI (pipeline.py, cli.py)
 - [x] Week 4 · plan: LLM repair loop feeding violations back to the planner (plan/llm.py)
 - [x] Week 4 · plan: LLM planner core, prompt + EDL parsing via ModelRouter (plan/llm.py)
 - [x] Week 4 · plan: shot table as planner input text (plan/shot_table.py)
@@ -807,6 +812,21 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   flattens message whitespace and explicitly reports empty input. The result model
   lives outside `schemas.py`; no schema change. No deterministic repair inside the
   loop, rules fallback, or pipeline/CLI wiring; rules remain the default.
+
+- 2026-11-06: opt-in LLM pipeline and CLI — `pipeline.cut` accepts `planner`
+  (`rules` by default), `router`, `brief`, and `max_repair_rounds=2`. LLM planning
+  calls `plan_with_repair` with analyzed shots, target, profile and brief through
+  `ModelRouter`; a missing router fails before analysis. `PlannerError` logs a
+  warning and falls back to rules. The existing validation, deterministic repair,
+  re-validation and render flow applies to either planner. LLM output stems append
+  `_llm` after the optional style suffix; rules and fallback stems are unchanged.
+  Explicit preview `--out` paths remain honored. `CutResult.planner`, `.fallback`
+  and `.repair_rounds` report the producer, fallback and LLM rounds (zero for rules).
+  The CLI adds `--planner {rules,llm}`, `--brief` and `--config`, loading the existing
+  router YAML format via `ModelRouter.from_yaml` only for LLM runs. Missing or invalid
+  config fails before analysis with a one-line error and exit 1. A planner/rounds/
+  fallback summary line is printed; other exit codes and rules output bytes are
+  unchanged. No prompt, parser, check, repair or schema changes; rules remain default.
 
 ## Open questions
 
