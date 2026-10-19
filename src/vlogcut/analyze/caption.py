@@ -1,14 +1,22 @@
 """Captioner core: keyframe messages and validated results through ModelRouter."""
 
 import base64
+import hashlib
+import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from vlogcut.llm.router import ModelRouter
+from vlogcut.schemas import Shot
+
+log = logging.getLogger(__name__)
+
+# Bump when the caption prompt or result interpretation changes.
+CAPTION_PROMPT_VERSION = 1
 
 
 class CaptionError(RuntimeError):
@@ -37,6 +45,23 @@ class CaptionResult(BaseModel):
         if len(tags) > 10:
             raise ValueError("tags must contain at most 10 unique non-blank tags")
         return tags
+
+
+class CaptionCacheKey(BaseModel):
+    """Model identity, ordered frame contents and core captioning settings."""
+
+    model: str
+    keyframe_sha1: list[str]
+    context: str
+    prompt_version: int
+
+
+class CaptionCache(BaseModel):
+    """Per-shot result; a local cache record, not a shared data contract."""
+
+    shot_id: str
+    key: CaptionCacheKey
+    result: CaptionResult
 
 
 def build_caption_messages(keyframes: Sequence[Path], *, context: str = "") -> list[dict[str, Any]]:
@@ -86,3 +111,57 @@ def caption_shot(
     """Call the captioner exactly once and parse its response, without retries."""
     messages = build_caption_messages(keyframes, context=context)
     return parse_caption(router.complete("captioner", messages))
+
+
+def caption_shots(
+    shots: Sequence[Shot],
+    router: ModelRouter,
+    workspace: str | Path,
+    *,
+    model: str,
+    include_rejected: bool = False,
+    context: str = "",
+    progress: Callable[[str], None] | None = None,
+) -> dict[str, CaptionResult]:
+    """Caption eligible shots in input order, reusing per-shot JSON records.
+
+    ``model`` identifies the model for caching; configure the router's captioner
+    role to select the actual model. Context is shared by all shots. Inputs are
+    not mutated. Progress reports each returned shot, including cache hits.
+    """
+    results: dict[str, CaptionResult] = {}
+    for shot in shots:
+        if shot.quality.rejected and not include_rejected:
+            continue
+        if not shot.keyframes:
+            log.warning("Skipping shot %s: no keyframes", shot.shot_id)
+            continue
+        keyframes = [Path(path) for path in shot.keyframes]
+        key = CaptionCacheKey(
+            model=model,
+            keyframe_sha1=[hashlib.sha1(path.read_bytes()).hexdigest() for path in keyframes],
+            context=context.strip(),
+            prompt_version=CAPTION_PROMPT_VERSION,
+        )
+        cache_path = Path(workspace) / "captions" / f"{shot.shot_id}.json"
+        result = None
+        try:
+            cache = CaptionCache.model_validate_json(cache_path.read_text(encoding="utf-8"))
+            if cache.shot_id == shot.shot_id and cache.key == key:
+                result = cache.result
+        except (FileNotFoundError, ValidationError, UnicodeError):
+            pass
+        if result is None:
+            result = caption_shot(router, keyframes, context=key.context)
+            cache = CaptionCache(shot_id=shot.shot_id, key=key, result=result)
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = cache_path.with_suffix(".part")
+            try:
+                tmp.write_text(cache.model_dump_json(indent=1), encoding="utf-8")
+                tmp.replace(cache_path)
+            finally:
+                tmp.unlink(missing_ok=True)
+        results[shot.shot_id] = result
+        if progress is not None:
+            progress(f"Captioned {shot.shot_id}")
+    return results

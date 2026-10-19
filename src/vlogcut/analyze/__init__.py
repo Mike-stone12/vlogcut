@@ -5,6 +5,7 @@ from vlogcut.analyze.caption import (
     CaptionResult,
     build_caption_messages,
     caption_shot,
+    caption_shots,
     parse_caption,
 )
 from vlogcut.analyze.look import LookParams, LookStats, load_rgb_frames, look_stats, pool_look
@@ -34,6 +35,7 @@ __all__ = [
     "assess_shots",
     "build_caption_messages",
     "caption_shot",
+    "caption_shots",
     "cut_points_in",
     "detect_pauses",
     "detect_shots",

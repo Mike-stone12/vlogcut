@@ -1,6 +1,7 @@
 """Offline captioner tests using tiny byte files and a fake provider client."""
 
 import base64
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,10 +13,14 @@ from vlogcut.analyze import (
     CaptionError,
     CaptionResult,
     build_caption_messages,
+    caption,
     caption_shot,
+    caption_shots,
     parse_caption,
 )
+from vlogcut.analyze.caption import CaptionCache
 from vlogcut.llm.router import ModelRouter
+from vlogcut.schemas import QualityFlags, Shot
 
 
 @pytest.fixture
@@ -96,13 +101,15 @@ def test_tag_normalization_and_limit() -> None:
 
 
 class FakeClient:
-    def __init__(self, output: str) -> None:
+    def __init__(self, output: str | Exception) -> None:
         self.output = output
         self.requests: list[dict[str, Any]] = []
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     def _create(self, **kwargs: Any) -> SimpleNamespace:
         self.requests.append(kwargs)
+        if isinstance(self.output, Exception):
+            raise self.output
         message = SimpleNamespace(content=self.output)
         return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None)
 
@@ -134,3 +141,183 @@ def test_caption_shot_calls_captioner_once(
     records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     assert len(records) == 1
     assert records[0]["role"] == "captioner"
+
+
+@pytest.fixture
+def batch_router(tmp_path: Path) -> tuple[ModelRouter, FakeClient]:
+    client = FakeClient(
+        CaptionResult(description="Coffee", tags=["cafe"], interest=4).model_dump_json()
+    )
+    router = ModelRouter(
+        {
+            "providers": {"fake": {"base_url": "http://fake/v1"}},
+            "roles": {"captioner": {"provider": "fake", "model": "m-cap"}},
+        },
+        log_path=tmp_path / "calls.jsonl",
+        client_factory=lambda _: client,
+    )
+    return router, client
+
+
+@pytest.fixture
+def shots(keyframes: list[Path]) -> list[Shot]:
+    return [
+        Shot(
+            shot_id=shot_id,
+            asset_id="asset",
+            start_s=i,
+            end_s=i + 1,
+            keyframes=[str(path) for path in keyframes],
+            quality=QualityFlags(sharpness=100, exposure_clip=0, shake=0),
+        )
+        for i, shot_id in enumerate(["s2", "s1"])
+    ]
+
+
+def test_batch_cache_miss_hit_and_order(
+    tmp_path: Path, shots: list[Shot], batch_router: tuple[ModelRouter, FakeClient]
+) -> None:
+    router, client = batch_router
+    before = [shot.model_dump() for shot in shots]
+    progress: list[str] = []
+    first = caption_shots(shots, router, tmp_path, model="m-cap", progress=progress.append)
+    assert list(first) == ["s2", "s1"]
+    assert len(client.requests) == 2
+    assert all(request["model"] == "m-cap" for request in client.requests)
+    for shot in shots:
+        path = tmp_path / "captions" / f"{shot.shot_id}.json"
+        cache = CaptionCache.model_validate_json(path.read_text(encoding="utf-8"))
+        assert cache.shot_id == shot.shot_id
+        assert cache.result == first[shot.shot_id]
+        assert cache.key.model == "m-cap"
+        assert cache.key.keyframe_sha1 == [
+            hashlib.sha1(Path(frame).read_bytes()).hexdigest() for frame in shot.keyframes
+        ]
+    client.requests.clear()
+    second = caption_shots(shots[::-1], router, tmp_path, model="m-cap", progress=progress.append)
+    assert second == first
+    assert list(second) == ["s1", "s2"]
+    assert client.requests == []
+    assert progress == ["Captioned s2", "Captioned s1", "Captioned s1", "Captioned s2"]
+    assert not list((tmp_path / "captions").glob("*.part"))
+    assert [shot.model_dump() for shot in shots] == before
+    records = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    assert [record["role"] for record in records] == ["captioner", "captioner"]
+
+
+@pytest.mark.parametrize("change", ["model", "bytes", "order", "context", "prompt"])
+def test_batch_cache_key_invalidation(
+    tmp_path: Path,
+    shots: list[Shot],
+    batch_router: tuple[ModelRouter, FakeClient],
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    router, client = batch_router
+    shot = shots[0]
+    caption_shots([shot], router, tmp_path, model="m-cap")
+    model, context = "m-cap", ""
+    if change == "model":
+        model = "another-model"
+    elif change == "bytes":
+        Path(shot.keyframes[0]).write_bytes(b"changed")
+    elif change == "order":
+        shot.keyframes.reverse()
+    elif change == "context":
+        context = "Morning"
+    else:
+        monkeypatch.setattr(caption, "CAPTION_PROMPT_VERSION", 2)
+    client.output = '{"description":"New caption","tags":[],"interest":2}'
+    result = caption_shots([shot], router, tmp_path, model=model, context=context)
+    assert len(client.requests) == 2
+    assert result[shot.shot_id].description == "New caption"
+    assert caption_shots([shot], router, tmp_path, model=model, context=context) == result
+    assert len(client.requests) == 2
+
+
+@pytest.mark.parametrize("damage", ["json", "encoding", "shot_id", "result", "key"])
+def test_batch_invalid_cache_recomputed(
+    tmp_path: Path,
+    shots: list[Shot],
+    batch_router: tuple[ModelRouter, FakeClient],
+    damage: str,
+) -> None:
+    router, client = batch_router
+    shot = shots[0]
+    expected = caption_shots([shot], router, tmp_path, model="m-cap")
+    path = tmp_path / "captions" / f"{shot.shot_id}.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if damage == "json":
+        path.write_text("broken JSON", encoding="utf-8")
+    elif damage == "encoding":
+        path.write_bytes(b"\xff")
+    else:
+        if damage == "shot_id":
+            data["shot_id"] = "wrong-shot"
+        elif damage == "result":
+            data["result"]["interest"] = 6
+        else:
+            del data["key"]["prompt_version"]
+        path.write_text(json.dumps(data), encoding="utf-8")
+    assert caption_shots([shot], router, tmp_path, model="m-cap") == expected
+    assert len(client.requests) == 2
+    CaptionCache.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def test_batch_skip_rules(
+    tmp_path: Path,
+    shots: list[Shot],
+    batch_router: tuple[ModelRouter, FakeClient],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    router, client = batch_router
+    shots[0].quality.rejected = True
+    shots[1].keyframes = []
+    assert caption_shots(shots, router, tmp_path, model="m-cap") == {}
+    assert client.requests == []
+    assert "Skipping shot s1: no keyframes" in caplog.text
+    assert not (tmp_path / "captions").exists()
+    result = caption_shots(shots, router, tmp_path, model="m-cap", include_rejected=True)
+    assert list(result) == ["s2"]
+    assert len(client.requests) == 1
+    assert caption_shots(shots, router, tmp_path, model="m-cap") == {}
+    assert len(client.requests) == 1  # Rejection also excludes a cached result.
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("provider failed"), "invalid JSON"])
+def test_batch_core_error_leaves_no_cache(
+    tmp_path: Path,
+    shots: list[Shot],
+    batch_router: tuple[ModelRouter, FakeClient],
+    failure: Exception | str,
+) -> None:
+    router, client = batch_router
+    client.output = failure
+    with pytest.raises(RuntimeError) as exc:
+        caption_shots(shots, router, tmp_path, model="m-cap")
+    if isinstance(failure, Exception):
+        assert exc.value is failure
+    else:
+        assert isinstance(exc.value, CaptionError)
+    assert len(client.requests) == 1
+    assert not list((tmp_path / "captions").glob("*"))
+
+
+def test_batch_atomic_write_cleanup(
+    tmp_path: Path,
+    shots: list[Shot],
+    batch_router: tuple[ModelRouter, FakeClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    router, _ = batch_router
+
+    def fail_replace(source: Path, target: Path) -> None:
+        assert source == target.with_suffix(".part")
+        CaptionCache.model_validate_json(source.read_text(encoding="utf-8"))
+        assert not target.exists()
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        caption_shots(shots, router, tmp_path, model="m-cap")
+    assert not list((tmp_path / "captions").glob("*"))

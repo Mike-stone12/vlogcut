@@ -77,9 +77,9 @@ ingest → analyze → plan → validate/repair → render/export → feedback
 - Shot kind (planned): `talking` / `broll` from VAD + caption; feeds the structure
   dimension of the style profile and the planner
 - Caption: **captioner** role (VLM) on 1–3 keyframes → description, tags, interest 1–5.
-  The core exists in `analyze/caption.py` via `ModelRouter`, but is not wired into
-  the pipeline or CLI. Quality + dedup filtering and caching (with the model name
-  in the cache key) remain planned
+  The core and cached batch layer exist in `analyze/caption.py` via `ModelRouter`,
+  with rejected-shot filtering and caching (model name in the cache key).
+  Pipeline/CLI wiring and dedup filtering remain planned
 - Cut-point candidates: energy-based audio pauses populate `Shot.cut_points` during
   analysis. The rules planner shifts fixed-length clips onto nearby candidates after
   length fitting and rounding. Beats of the chosen music, motion minima and LLM
@@ -1051,6 +1051,20 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   as a local analysis result. The core is not wired into the pipeline or CLI;
   Shot population, caching, quality/dedup filtering and privacy enforcement remain
   planned. No schema change or new dependency; router behavior is unchanged.
+
+- 2026-10-19: cached batch captions — `analyze/caption.caption_shots` returns a
+  shot-ID mapping in input order without changing Shot records. `CaptionCache`
+  lives outside `schemas.py` at `<workspace>/captions/<shot_id>.json`, keyed by
+  shot ID, an explicit model identifier, ordered SHA-1 hashes of each keyframe's
+  bytes, stripped context and the core's prompt version. The model identifier
+  labels the cache; the router's captioner role still selects the actual model.
+  Missing, invalid or mismatched records trigger the existing single-shot core
+  through `ModelRouter.complete("captioner", ...)`. Valid results are written via
+  a `.part` file then replace, with cleanup on write failure; core errors propagate
+  before any cache write. Rejected shots are skipped unless `include_rejected=True`;
+  shots without keyframes are always skipped with a warning. Cache hits make no
+  model call. Pipeline/CLI wiring, dedup filtering and privacy enforcement remain
+  planned; no schema change, new dependency or thread pool.
 
 ## Open questions
 
