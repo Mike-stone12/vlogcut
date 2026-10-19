@@ -17,6 +17,7 @@ vlogcut style build <refs...> -o fast.json   # finished videos -> style profile;
 vlogcut cut <footage folder> --style fast.json   # pace the cut from a profile
 vlogcut cut <footage folder> --music song.mp3
 vlogcut feedback page <previews...>   # local HTML; feedback pairs <feedback.json> for pairs
+vlogcut feedback classify feedback.json --profile fast.json -o updated.json
 pytest -q                 # tests (offline, no GPU, no API keys)
 ruff check . && ruff format --check .
 ```
