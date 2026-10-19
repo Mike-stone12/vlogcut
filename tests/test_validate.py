@@ -154,6 +154,96 @@ def test_chronology_uses_supplied_order_not_timestamps() -> None:
     assert validate_edl(edl, shots) == []
 
 
+def test_cold_open_allowance_preserves_default_violation() -> None:
+    edl, shots, profile = _edl(3, 3, 3), _shots(), _profile()
+    for clip, shot_id in zip(edl.clips, ("2", "0", "1"), strict=True):
+        clip.shot_id = shot_id
+    expected = [
+        Violation(
+            code="not_chronological",
+            clip_index=1,
+            message="Shot '0' position 0 is not after previous known position 2",
+        )
+    ]
+    assert validate_edl(edl, shots, None) == expected
+    assert validate_edl(edl, shots, profile) == expected
+    profile.cold_open_clips = 1
+    assert validate_edl(edl, shots, profile) == []
+
+
+@pytest.mark.parametrize(
+    "allowance,ids",
+    [
+        (1, ("2", "0", "1", "2")),  # The hook can be used again later.
+        (1, ("2", "2")),  # Even immediately after the hook.
+        (2, ("2", "1", "0", "1", "2")),
+        (2, ("1", "2", "0", "1", "2")),
+        (2, ("2", "2", "0", "1")),
+        (10, ("2", "1", "0", "0")),
+    ],
+)
+def test_cold_open_exempts_leading_clips(allowance: int, ids: tuple[str, ...]) -> None:
+    edl, profile = _edl(*([3] * len(ids))), _profile()
+    profile.cold_open_clips = allowance
+    for clip, shot_id in zip(edl.clips, ids, strict=True):
+        clip.shot_id = shot_id
+    assert validate_edl(edl, _shots(), profile) == []
+
+
+@pytest.mark.parametrize(
+    "ids,expected",
+    [
+        (("2", "1", "0"), [("not_chronological", 2)]),
+        (("2", "0", "0"), [("not_chronological", 2)]),
+        (("2", "1", "missing", "0"), [("unknown_shot", 2), ("not_chronological", 3)]),
+        (("missing", "1", "0"), [("unknown_shot", 0), ("not_chronological", 2)]),
+        (("2", "missing", "0"), [("unknown_shot", 1)]),
+    ],
+)
+def test_chronology_after_cold_open(ids: tuple[str, ...], expected: list[tuple[str, int]]) -> None:
+    edl, profile = _edl(*([3] * len(ids))), _profile()
+    profile.cold_open_clips = 1
+    for clip, shot_id in zip(edl.clips, ids, strict=True):
+        clip.shot_id = shot_id
+    violations = validate_edl(edl, _shots(), profile)
+    assert [(v.code, v.clip_index) for v in violations] == expected
+
+
+def test_cold_open_chronology_uses_supplied_order() -> None:
+    edl, profile = _edl(3, 3, 3, 3), _profile()
+    profile.cold_open_clips = 1
+    for clip, shot_id in zip(edl.clips, ("0", "2", "1", "0"), strict=True):
+        clip.shot_id = shot_id
+    assert validate_edl(edl, _shots()[::-1], profile) == []
+
+
+@pytest.mark.parametrize("allowance", [1, 2, 10])
+def test_cold_open_preserves_all_other_checks(allowance: int) -> None:
+    edl, shots, profile = _edl(11, 0.5, 3, 3), _shots(), _profile(0)
+    for clip, shot_id in zip(edl.clips, ("2", "0", "missing", "1"), strict=True):
+        clip.shot_id = shot_id
+    shots[2].quality.rejected = True
+    shots[0].dup_group = shots[2].dup_group = "same"
+    _dissolve(edl, 1, 12)
+    _dissolve(edl, 3, 4)
+    expected = [
+        v for v in validate_edl(edl, shots, profile, target_s=100) if v.code != "not_chronological"
+    ]
+    assert {v.code for v in expected} == {
+        "unknown_shot",
+        "out_of_bounds",
+        "rejected_shot",
+        "clip_too_short",
+        "clip_too_long",
+        "duplicate_neighbours",
+        "transition_not_allowed",
+        "dissolve_too_long",
+        "total_duration",
+    }
+    profile.cold_open_clips = allowance
+    assert validate_edl(edl, shots, profile, target_s=100) == expected
+
+
 @pytest.mark.parametrize("share,expected", [(None, []), (0.5, []), (0, ["transition_not_allowed"])])
 def test_transition_mix(share: float | None, expected: list[str]) -> None:
     edl = _edl(3, 3)

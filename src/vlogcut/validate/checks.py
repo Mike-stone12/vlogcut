@@ -34,8 +34,9 @@ def validate_edl(
 
     Shot.dup_group is checked only for actual neighbours with known shot IDs.
     Chronology uses strictly increasing positions in the supplied shots, comparing
-    successive known IDs across unknown ones. Cold opens are unsupported until
-    StyleProfile.cold_open_clips exists. Audio has no profile dimension to check.
+    successive known IDs across unknown ones after skipping the first
+    profile.cold_open_clips clips (zero without a profile). The opening clips
+    still receive all other checks. Audio has no profile dimension to check.
     Unknown IDs receive only unknown_shot; their declared timeline durations still
     contribute to the total and to neighbouring clips' dissolve geometry checks.
     Dissolve boundary errors belong to the incoming clip; window overlap errors
@@ -45,6 +46,7 @@ def validate_edl(
     durations = [clip.timeline_duration_s for clip in edl.clips]
     violations: list[Violation] = []
     previous_position: int | None = None
+    cold_open_clips = profile.cold_open_clips if profile is not None else 0
 
     def add(code: str, index: int | None, message: str) -> None:
         violations.append(Violation(code=code, clip_index=index, message=message))
@@ -81,14 +83,15 @@ def validate_edl(
                     f"Shots {previous[1].shot_id!r} and {shot.shot_id!r} "
                     f"share dup_group {shot.dup_group!r}",
                 )
-        if previous_position is not None and position <= previous_position:
-            add(
-                "not_chronological",
-                i,
-                f"Shot {shot.shot_id!r} position {position} "
-                f"is not after previous known position {previous_position}",
-            )
-        previous_position = position
+        if i >= cold_open_clips:
+            if previous_position is not None and position <= previous_position:
+                add(
+                    "not_chronological",
+                    i,
+                    f"Shot {shot.shot_id!r} position {position} "
+                    f"is not after previous known position {previous_position}",
+                )
+            previous_position = position
 
         transition = clip.transition_in
         if transition.kind == "dissolve":

@@ -156,6 +156,35 @@ def test_style_profile_duration_stats_ordered():
     assert profile.version == 1
 
 
+def test_style_profile_cold_open_default_and_old_json() -> None:
+    profile = StyleProfile(shot_duration_s=DurationStats(p10=1, median=2, p90=4), cuts_per_min=20)
+    assert profile.cold_open_clips == 0
+    old = StyleProfile.model_validate_json(
+        '{"shot_duration_s": {"p10": 1, "median": 2, "p90": 4}, "cuts_per_min": 20}'
+    )
+    assert old.cold_open_clips == 0
+
+
+def test_style_profile_cold_open_rejects_negative() -> None:
+    with pytest.raises(ValidationError, match="cold_open_clips"):
+        StyleProfile(
+            shot_duration_s=DurationStats(p10=1, median=2, p90=4),
+            cuts_per_min=20,
+            cold_open_clips=-1,
+        )
+
+
+def test_style_profile_cold_open_round_trip() -> None:
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1, median=2, p90=4),
+        cuts_per_min=20,
+        cold_open_clips=2,
+    )
+    restored = StyleProfile.model_validate_json(profile.model_dump_json())
+    assert restored == profile
+    assert restored.cold_open_clips == 2
+
+
 def test_style_profile_unmeasured_ratios_are_none():
     stats = DurationStats(p10=1.0, median=2.0, p90=4.0)
     profile = StyleProfile(shot_duration_s=stats, cuts_per_min=20)
