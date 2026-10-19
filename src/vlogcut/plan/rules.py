@@ -9,7 +9,7 @@ Week-1 baseline and, later, the fallback when the planner's EDL cannot be repair
    the k best overall, then re-sorted by time; replace adjacent duplicate-group
    picks when a chronological, conflict-free alternative exists
 4. sample the profile's length distribution, using its mean to choose k; assign long
-   samples to shots with room, then fit to the target with one shared offset clamped
+   samples to shots with room, shape intro pacing, then fit with one shared offset clamped
    to p10..p90 and each shot's usable part; grow / shrink k until within tolerance
 5. place each clip in the middle of the usable part; shots kept for their audio
    (someone talking) start at the beginning of the usable part and run as long as the
@@ -131,6 +131,36 @@ def assign_lengths(
     for i, length in zip(order, remaining, strict=True):
         base[i] = length
     return base
+
+
+def apply_intro_pace(
+    base: Sequence[float],
+    floors: Sequence[float],
+    caps: Sequence[float],
+    ratio: float,
+    intro_s: float = 20.0,
+) -> list[float]:
+    """Multiply intro bases by ratio, clamping each to its own floor/cap.
+
+    Whole clips starting strictly before intro_s on the unscaled base timeline
+    form the intro. Bases sample one pacing distribution, so multiplication is
+    a simple relative bias (1.0 is neutral within bounds), not an exact median
+    match after clamping, fitting and boundary shifts. Body clips stay unchanged;
+    without both intro and body clips, return an unchanged copy. Inputs have
+    equal lengths, positive bases/ratio, and ordered floor/cap pairs.
+    """
+    start = 0.0
+    n_intro = 0
+    for length in base:
+        if start < intro_s:
+            n_intro += 1
+        start += length
+    if n_intro == 0 or n_intro == len(base):
+        return list(base)
+    return [
+        min(cap, max(floor, length * ratio)) if i < n_intro else length
+        for i, (length, floor, cap) in enumerate(zip(base, floors, caps, strict=True))
+    ]
 
 
 def fit_lengths(base: Sequence[float], lo: Sequence[float], hi: Sequence[float], target: float):
@@ -312,6 +342,9 @@ def rough_cut(
     """Build a rough cut, shifting onto candidates by at most max_shift_s (None: unbounded)."""
     params = params or RoughCutParams()
     pace = profile.shot_duration_s if profile else DEFAULT_PACING
+    intro_ratio = (
+        profile.structure.intro_pace_ratio if profile is not None and profile.structure else None
+    )
     by_id = {a.asset_id: a for a in assets}
 
     ordered = sorted(shots, key=lambda s: (order_key(by_id.get(s.asset_id)), s.asset_id, s.start_s))
@@ -332,7 +365,7 @@ def rough_cut(
     seen: set[int] = set()
     while True:
         picked = select(cands, k, params.strategy)
-        lengths = _lengths(picked, pace, target)
+        lengths = _lengths(picked, pace, target, intro_ratio)
         total = sum(lengths)
         seen.add(len(picked))
         if total < target * (1 - tol) and len(picked) < len(cands) and len(picked) + 1 not in seen:
@@ -367,7 +400,12 @@ def rough_cut(
     )
 
 
-def _lengths(picked: list[_Candidate], pace: DurationStats, target: float) -> list[float]:
+def _lengths(
+    picked: list[_Candidate],
+    pace: DurationStats,
+    target: float,
+    intro_ratio: float | None = None,
+) -> list[float]:
     caps = [min(pace.p90, c.avail) for c in picked]
     floors = [min(pace.p10, cap) for cap in caps]
     base = assign_lengths(
@@ -376,6 +414,12 @@ def _lengths(picked: list[_Candidate], pace: DurationStats, target: float) -> li
         [c.score for c in picked],
         [c.talking for c in picked],
     )
+    if intro_ratio is not None:
+        base = apply_intro_pace(base, floors, caps, intro_ratio)
+        # Talking clips keep their assigned cap before the existing shared-offset fit.
+        for i, c in enumerate(picked):
+            if c.talking:
+                base[i] = caps[i]
     return fit_lengths(base, floors, caps, target)
 
 

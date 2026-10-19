@@ -8,6 +8,8 @@ from vlogcut.plan import RoughCutError, RoughCutParams, rough_cut, score_shot
 from vlogcut.plan.rules import (
     DEFAULT_PACING,
     _Candidate,
+    _lengths,
+    apply_intro_pace,
     assign_lengths,
     assign_transitions,
     avoid_adjacent_duplicates,
@@ -22,10 +24,12 @@ from vlogcut.schemas import (
     MediaAsset,
     QualityFlags,
     Shot,
+    StructureStats,
     StyleProfile,
     Transition,
     TransitionMix,
 )
+from vlogcut.style.distance import profile_from_edl
 from vlogcut.style.profile import duration_stats
 from vlogcut.validate.checks import validate_edl
 
@@ -391,6 +395,102 @@ def test_fit_lengths_hits_target_within_bounds():
     out = fit_lengths([3, 3, 3], [1.5, 1.5, 1.5], [5, 5, 2], 11)
     assert sum(out) == pytest.approx(11, abs=1e-3)
     assert out[2] == 2 and all(1.5 <= x <= 5 for x in out)
+
+
+def test_apply_intro_pace_uses_unscaled_starts_and_preserves_inputs() -> None:
+    base, floors, caps = [8.0, 7.0, 5.0, 6.0, 4.0], [1.0] * 5, [10.0] * 5
+    before = (base.copy(), floors.copy(), caps.copy())
+    # The third clip is still intro; the fourth starts exactly at 20 s.
+    assert apply_intro_pace(base, floors, caps, 0.5) == [4.0, 3.5, 2.5, 6.0, 4.0]
+    assert (base, floors, caps) == before
+
+
+@pytest.mark.parametrize("ratio,expected", [(0.1, [2, 3, 5]), (2.0, [12, 11, 5])])
+def test_apply_intro_pace_clamps_per_clip(ratio: float, expected: list[float]) -> None:
+    assert apply_intro_pace([10, 10, 5], [2, 3, 1], [12, 11, 8], ratio) == expected
+
+
+@pytest.mark.parametrize("base", [[], [25.0], [10.0, 9.0], [10.0, 10.0]])
+def test_apply_intro_pace_without_body_is_unchanged(base: list[float]) -> None:
+    assert apply_intro_pace(base, [1.0] * len(base), [30.0] * len(base), 0.5) == base
+
+
+def test_apply_intro_pace_neutral_ratio_and_window_override() -> None:
+    base = [8.0, 7.0, 5.0, 6.0]
+    floors, caps = [1.0] * 4, [10.0] * 4
+    assert apply_intro_pace(base, floors, caps, 1.0) == base
+    assert apply_intro_pace(base, floors, caps, 0.5, intro_s=0) == base
+    assert apply_intro_pace(base, floors, caps, 0.5, intro_s=8) == [4.0, 7.0, 5.0, 6.0]
+
+
+@pytest.mark.parametrize("ratio", [0.5, 2.0])
+def test_intro_pace_keeps_audio_bases_at_cap_before_fit(
+    monkeypatch: pytest.MonkeyPatch, ratio: float
+) -> None:
+    picked = [_candidate(i, None) for i in range(12)]
+    # Audio clips count toward intro starts, but must not be scaled themselves.
+    for i in (0, 6, 11):
+        picked[i].shot.quality.warnings = ["kept_for_audio"]
+        picked[i].hi = 4.0
+    calls: list[tuple[list[float], list[float], list[float], float]] = []
+
+    def capture_fit(
+        base: list[float], floors: list[float], caps: list[float], target: float
+    ) -> list[float]:
+        calls.append((base.copy(), floors.copy(), caps.copy(), target))
+        return fit_lengths(base, floors, caps, target)
+
+    monkeypatch.setattr("vlogcut.plan.rules.fit_lengths", capture_fit)
+    _lengths(picked, DEFAULT_PACING, 40)
+    _lengths(picked, DEFAULT_PACING, 40, ratio)
+    plain, shaped = calls
+    assert shaped[1:] == plain[1:]
+    for i in (0, 6, 11):
+        assert shaped[0][i] == plain[0][i] == 4.0
+    assert shaped[0] != plain[0]
+
+
+@pytest.mark.parametrize("strategy", ["coverage", "highlights"])
+def test_rough_cut_intro_pace_moves_measured_ratio_toward_profile(strategy: str) -> None:
+    shots, assets = _day()
+    shots[20].quality.warnings = ["kept_for_audio"]  # first chronological shot
+    params = RoughCutParams(target_s=60, strategy=strategy)
+    profile = StyleProfile(
+        shot_duration_s=DEFAULT_PACING,
+        cuts_per_min=20,
+        structure=StructureStats(montage_share=0, intro_pace_ratio=0.5),
+    )
+    plain = rough_cut(shots, assets, params)
+    shaped = rough_cut(shots, assets, params, profile)
+    before = profile_from_edl(plain).structure
+    after = profile_from_edl(shaped).structure
+    assert before is not None and before.intro_pace_ratio is not None
+    assert after is not None and after.intro_pace_ratio is not None
+    assert abs(after.intro_pace_ratio - 0.5) < abs(before.intro_pace_ratio - 0.5)
+    assert shaped.total_duration_s == pytest.approx(params.target_s, rel=0.1)
+    assert [c.shot_id for c in shaped.clips] == [c.shot_id for c in plain.clips]
+    assert shaped.clips[0].in_s == plain.clips[0].in_s == 0
+    assert shaped.clips[0].timeline_duration_s == DEFAULT_PACING.p90
+    for a, b in zip(plain.clips, shaped.clips, strict=True):
+        assert a.model_dump(exclude={"in_s", "out_s"}) == b.model_dump(exclude={"in_s", "out_s"})
+
+
+@pytest.mark.parametrize("strategy", ["coverage", "highlights"])
+@pytest.mark.parametrize("structure", [None, StructureStats(montage_share=0)])
+def test_rough_cut_unmeasured_intro_matches_profileless_json(
+    monkeypatch: pytest.MonkeyPatch, strategy: str, structure: StructureStats | None
+) -> None:
+    shots, assets = _day()
+    shots[20].quality.warnings = ["kept_for_audio"]
+    params = RoughCutParams(target_s=60, strategy=strategy)
+    profile = StyleProfile(shot_duration_s=DEFAULT_PACING, cuts_per_min=20, structure=structure)
+
+    def unexpected_scaling(*args: object, **kwargs: object) -> list[float]:
+        pytest.fail("unmeasured intro pacing must bypass scaling")
+
+    monkeypatch.setattr("vlogcut.plan.rules.apply_intro_pace", unexpected_scaling)
+    plain = rough_cut(shots, assets, params).model_dump_json().encode()
+    assert rough_cut(shots, assets, params, profile).model_dump_json().encode() == plain
 
 
 @pytest.mark.parametrize(

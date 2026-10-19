@@ -101,8 +101,9 @@ flags are skipped: references are finished edits), then aggregate:
   Intro length, speech ratio, talking ↔ b-roll alternation (transition
   counts between shot kinds), and cold-open measurement remain planned. Pacing alone
   reads as a speed slider; structure is what makes a cut recognisably someone's.
-  Cold-open allowance is user-set. Planners do not yet use the intro pacing ratio
-  or produce bursts or cold opens.
+  Cold-open allowance is user-set. The rules planner uses the intro pacing ratio
+  to shape clip lengths before fitting the total; planners do not yet produce
+  bursts or cold opens.
 - Transitions: share of hard cuts / dissolves (from `analyze/transitions.py`); fades
   through black currently count as two dissolves
 - Audio: speech-over-music ratio, whether clip audio is kept under music
@@ -261,7 +262,10 @@ Each reference restarts at zero; whole shots starting strictly before 20 s belon
 to the intro, all others to the body. Pool durations, not per-reference ratios,
 using the same ordered, post-merge durations (speed-adjusted clips for EDLs).
 Fewer than two shots in either pool yields `None`, meaning not measured. Old JSON
-with structure but without this field loads with `None`. Planners do not yet use it.
+with structure but without this field loads with `None`. The rules planner uses a
+measured ratio to scale intro base lengths before fitting the total, preserving
+the cap-based assignment for `kept_for_audio` clips. Unmeasured ratios leave EDL
+JSON unchanged; the LLM planner does not yet use this dimension.
 
 `StyleProfile.cold_open_clips` is a non-negative, user-set integer defaulting to 0
 (no cold open), including when absent from old profile JSON. It exempts the first
@@ -364,6 +368,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 3 · structure: rules planner honours intro_pace_ratio (plan/rules.py)
 - [x] Week 5 · feedback: CLI page + pairs subcommands (cli.py)
 - [x] Week 5 · feedback: static variants page + feedback JSON loader (feedback/page.py)
 - [x] Week 5 · feedback: Feedback / PreferencePair contracts and pair derivation (schemas.py, feedback/pairs.py)
@@ -986,7 +991,22 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   accepts a positive `intro_s` override, defaulting to 20 s. Style distance adds
   equally weighted `intro_pace = |log2(a / b)|` in octaves, skipped and reported when
   either side is unmeasured. Reference caches, detection parameters and notes are
-  unchanged. Planners do not yet use the value.
+  unchanged. Rules planner use is described below; LLM planner use remains planned.
+
+- 2026-10-18: rules planner intro pacing — after `assign_lengths` and before
+  `fit_lengths`, the pure `plan/rules.apply_intro_pace` multiplies intro bases by
+  the measured `structure.intro_pace_ratio`, clamping to each clip's floor/cap.
+  Intro membership uses cumulative unscaled base starts strictly before 20 s;
+  whole clips belong to one side. Bases sample one pacing distribution, so this
+  is a relative bias with 1.0 neutral within bounds, not an exact median match.
+  Body bases stay unchanged; no intro or no body returns unchanged lengths.
+  `kept_for_audio` bases retain their existing cap assignment before the shared
+  offset fit. Fitting and clip-count adjustment retain the existing ±10 % target
+  tolerance when footage permits. Clamping, fitting and shifts across the 20 s
+  boundary can limit the measured effect. Missing profile, structure or ratio
+  bypasses scaling and preserves EDL JSON bytes. Selection, duplicate avoidance,
+  placement, transition assignment and clip audio rules are unchanged. No schema
+  change, burst/cold-open generation, LLM prompt change or intro-pace validation.
 
 ## Open questions
 
