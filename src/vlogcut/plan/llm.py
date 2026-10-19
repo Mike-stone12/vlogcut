@@ -38,6 +38,36 @@ def format_violations(violations: Sequence[Violation]) -> str:
     )
 
 
+def _structure_lines(profile: StyleProfile) -> list[str]:
+    """Describe measured structure targets with stable numeric formatting."""
+    structure = profile.structure
+    if structure is None:
+        return []
+    median = profile.shot_duration_s.median
+    lines = []
+    if structure.montage_share is not None:
+        share = structure.montage_share
+        target = (
+            "no montage bursts are wanted."
+            if share == 0
+            else f"aim for {share:.2f} of clips in montage bursts."
+        )
+        lines.append(
+            f"Montage share={share:.2f}: {target} A burst is a run of at least three "
+            "consecutive clips, each with a timeline duration strictly shorter than "
+            f"half the profile median ({median / 2:.2f} s)."
+        )
+    if structure.intro_pace_ratio is not None:
+        ratio = structure.intro_pace_ratio
+        lines.append(
+            f"Intro pace ratio={ratio:.2f}: clips starting in the first 20 s of the timeline "
+            f"should have a median length about {ratio:.2f} times the body median "
+            f"(approximately {ratio * median:.2f} s, "
+            "using the profile median as the body estimate)."
+        )
+    return lines
+
+
 def build_planner_messages(
     shots: Sequence[Shot],
     *,
@@ -75,6 +105,14 @@ MusicCue fields: track_id (user-supplied track id), start_s (non-negative number
 gain_db (number, default 0). No music tracks are supplied here, so leave music empty."""
     pacing = "No style profile."
     if profile is not None:
+        if profile.cold_open_clips > 0:
+            system = system.replace(
+                "- Keep chronological order as given by the table; select each shot at most once.",
+                f"- Cold open: at most {profile.cold_open_clips} leading clips may come from later "
+                "in the day as a hook before the chronological timeline. Keep the remaining "
+                "clips in chronological order as given by the table; "
+                "select each shot at most once.",
+            )
         stats = profile.shot_duration_s
         pacing = (
             f"Profile pacing: p10={stats.p10} s / median={stats.median} s / "
@@ -85,6 +123,7 @@ gain_db (number, default 0). No music tracks are supplied here, so leave music e
             if profile.transitions is not None
             else " Dissolve share: not measured."
         )
+        pacing = "\n".join([pacing, *_structure_lines(profile)])
     user = "\n".join(
         [
             f"Target duration: {target_s} seconds (target_s).",

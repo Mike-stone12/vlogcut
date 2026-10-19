@@ -1,5 +1,6 @@
 """Offline planner tests using the real router with a scripted provider client."""
 
+import hashlib
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -25,6 +26,7 @@ from vlogcut.schemas import (
     DurationStats,
     QualityFlags,
     Shot,
+    StructureStats,
     StyleProfile,
     TransitionMix,
 )
@@ -138,6 +140,96 @@ def test_messages_include_profile_and_brief(
         else f"Dissolve share={dissolve_share}."
     )
     assert expected in user
+
+
+@pytest.mark.parametrize("intro_ratio", [0.5, 0.75])
+def test_messages_describe_measured_structure(shots: list[Shot], intro_ratio: float) -> None:
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1, median=5, p90=8),
+        cuts_per_min=12,
+        structure=StructureStats(montage_share=0.3, intro_pace_ratio=intro_ratio),
+    )
+    before = profile.model_dump()
+    messages = build_planner_messages(shots, target_s=60, profile=profile)
+    assert messages == build_planner_messages(shots, target_s=60, profile=profile)
+    user = messages[1]["content"]
+    assert "Montage share=0.30: aim for 0.30 of clips in montage bursts." in user
+    assert "at least three consecutive clips" in user
+    assert "strictly shorter than half the profile median (2.50 s)" in user
+    assert f"Intro pace ratio={intro_ratio:.2f}" in user
+    assert "clips starting in the first 20 s of the timeline" in user
+    assert f"median length about {intro_ratio:.2f} times the body median" in user
+    assert f"approximately {intro_ratio * 5:.2f} s" in user
+    assert profile.model_dump() == before
+
+
+def test_messages_describe_zero_montage_and_omit_unmeasured_intro(shots: list[Shot]) -> None:
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1, median=5, p90=8),
+        cuts_per_min=12,
+        structure=StructureStats(montage_share=0),
+    )
+    user = build_planner_messages(shots, target_s=60, profile=profile)[1]["content"]
+    assert "Montage share=0.00: no montage bursts are wanted." in user
+    assert "at least three consecutive clips" in user
+    assert "half the profile median (2.50 s)" in user
+    assert "Intro pace" not in user
+    assert "first 20 s" not in user
+
+
+@pytest.mark.parametrize("structure", [None, StructureStats(montage_share=0.3)])
+def test_messages_allow_cold_open(shots: list[Shot], structure: StructureStats | None) -> None:
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1, median=5, p90=8),
+        cuts_per_min=12,
+        structure=structure,
+        cold_open_clips=2,
+    )
+    system = build_planner_messages(shots, target_s=60, profile=profile)[0]["content"]
+    assert (
+        "Cold open: at most 2 leading clips may come from later in the day as a hook "
+        "before the chronological timeline."
+    ) in system
+    assert "Keep the remaining clips in chronological order as given by the table" in system
+    assert "select each shot at most once." in system
+    assert "- Keep chronological order as given by the table" not in system
+
+
+@pytest.mark.parametrize("profile_given", [False, True])
+@pytest.mark.parametrize("dissolve_share", [None, 0.0, 0.25])
+def test_unmeasured_profile_preserves_original_prompt_bytes(
+    shots: list[Shot], profile_given: bool, dissolve_share: float | None
+) -> None:
+    profile = None
+    pacing = "No style profile."
+    if profile_given:
+        profile = StyleProfile(
+            shot_duration_s=DurationStats(p10=1.5, median=3, p90=7.5),
+            cuts_per_min=18,
+            transitions=(
+                TransitionMix(hard_cut=1 - dissolve_share, dissolve=dissolve_share)
+                if dissolve_share is not None
+                else None
+            ),
+        )
+        pacing = "Profile pacing: p10=1.5 s / median=3.0 s / p90=7.5 s; cuts per minute=18.0."
+        pacing += (
+            " Dissolve share: not measured."
+            if dissolve_share is None
+            else f" Dissolve share={dissolve_share}."
+        )
+    messages = build_planner_messages(shots, target_s=10, profile=profile)
+    # Captured from the original system prompt before adding structure guidance.
+    assert hashlib.sha256(messages[0]["content"].encode("utf-8")).hexdigest() == (
+        "a9923fc0954efa03f365e943650429602202bfa058be3b3b66612d9362f7394b"
+    )
+    expected_user = (
+        f"Target duration: 10 seconds (target_s).\n{pacing}\nBrief: none.\n"
+        f"Shot table (chronological order):\n{format_shot_table(shots)}"
+    )
+    assert messages[1]["content"].encode("utf-8") == expected_user.encode("utf-8")
+    for wording in ("montage", "Intro pace", "first 20 s", "Cold open"):
+        assert wording not in str(messages)
 
 
 @pytest.mark.parametrize("wrapper", [" {} \n", "```json\n{}\n```", "\n```\r\n{}\r\n```\n"])
