@@ -256,6 +256,7 @@ def test_profile_from_edl_uses_timeline_durations():
     assert p.source_refs == ["edl"]
     assert p.look is None
     assert p.music_bpm is None
+    assert p.energy_curve is None
     reference = p.model_copy(update={"music_bpm": 120})
     distance = profile_distance(reference, p)
     assert "music_bpm" in distance.unmeasured

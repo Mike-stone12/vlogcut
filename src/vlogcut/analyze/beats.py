@@ -1,4 +1,4 @@
-"""Pure, fixed-tempo beat analysis of mono samples; no decoding or caching."""
+"""Pure beat and energy analysis of mono samples; no decoding or caching."""
 
 from __future__ import annotations
 
@@ -52,6 +52,34 @@ def _array(values: np.ndarray, rate: float) -> np.ndarray:
     if array.ndim != 1 or not np.isfinite(array).all():
         raise ValueError("audio/envelope must be a finite one-dimensional array")
     return array
+
+
+def energy_curve(samples: np.ndarray, sample_rate: int, bins: int = 10) -> list[float] | None:
+    """RMS over equal time spans, normalized by the largest bin RMS.
+
+    Boundaries are rounded down to sample indices; every sample is included.
+    Empty, too-short and silent signals are unmeasured.
+    """
+    import numpy as np
+
+    if bins < 1:
+        raise ValueError("bins must be positive")
+    values = _array(samples, sample_rate)
+    if len(values) < bins:
+        return None
+    peak = float(np.max(np.abs(values)))
+    if peak == 0:
+        return None
+    # Scaling first avoids overflow/underflow without changing normalized RMS.
+    values = values / peak
+    edges = [i * len(values) // bins for i in range(bins + 1)]
+    rms = np.array(
+        [
+            np.sqrt(np.mean(values[start:end] ** 2))
+            for start, end in zip(edges, edges[1:], strict=False)
+        ]
+    )
+    return (rms / rms.max()).tolist()
 
 
 def onset_envelope(

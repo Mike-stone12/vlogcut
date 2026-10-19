@@ -115,7 +115,12 @@ flags are skipped: references are finished edits), then aggregate:
   describes measured BPM and its beat period as guidance for clip lengths near
   whole beat multiples when they fit. The rules planner and validation still ignore it.
   Chosen-music beat snapping is wired as opt-in via `pipeline.cut(music=...)`.
-  The profile energy curve remains planned
+  `energy_curve` measures RMS in ten equal time spans of each reference's own audio,
+  normalized by that reference's maximum bin RMS. Pool measured curves by reference
+  duration, rounding to six decimals. It shares the beats audio decode, cache and
+  enable flag; silent, too-short or absent audio contributes nothing. Style show
+  lists measured values with two decimals. This is measurement only: style distance,
+  diff, planners, validation and chosen-music analysis do not use the curve
 - Structure ("grammar"): montage bursts are now measured as the share of shots in
   runs of at least three shots shorter than half the pooled median, within each
   reference. Intro-vs-body pacing is the pooled median duration of shots starting
@@ -397,6 +402,18 @@ the same serialized bytes.
 `StyleProfile.beat_aligned_ratio` pools aligned cuts / total cuts over references with
 detected beats. It is `None` if beat detection is disabled for any reference, no
 reference has beats, or the pooled cut count is zero.
+
+`StyleProfile.energy_curve: list[float] | None = None` contains exactly ten finite
+values in [0, 1] when measured. Each reference contributes RMS over ten consecutive,
+equal time spans (boundaries rounded down to sample indices), divided by its largest
+bin RMS. Empty audio, fewer than ten samples, silence and missing audio are unmeasured.
+Pool measured curves with a duration-weighted bin-wise mean, rounded to six decimals;
+do not renormalize the pooled curve. Disabled beat/audio analysis for the profile or
+any reference, no contributing references, and EDL-derived profiles leave it `None`.
+Old JSON without the field loads as `None`; the wrap serializer omits unmeasured
+values, preserving existing profile JSON bytes. Measured values round-trip and appear
+on one `style show` line with two decimals. No style distance, diff, planner or
+validation use is added.
 
 `StyleProfile.music_bpm: float | None = None` is finite and strictly positive when
 measured. It measures the references' own audio: sort each reference's detected
@@ -766,6 +783,16 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: reference audio energy — **schema change**: optional
+  `StyleProfile.energy_curve` measures ten max-normalized RMS bins per reference,
+  then pools by duration with six-decimal rounding. Reuse the mono samples decoded
+  for beats; `ReferenceParams.beats` also controls energy measurement. Cache the
+  per-reference curve, including explicit `None`; an enabled-audio cache missing
+  the field is a cache miss. Silent, too-short and absent audio contributes nothing,
+  independently of whether a pulse is detected. Omit unmeasured profile values from
+  serialization and display; EDL profiles remain unmeasured. No beat detector/BPM,
+  style distance/diff, prompt, rules planner, validation or chosen-music changes.
 
 - 2026-10-19: reference fades through black — pair consecutive dissolve detections
   when their gap is 0 to 1.0 s inclusive and every sampled frame from the first

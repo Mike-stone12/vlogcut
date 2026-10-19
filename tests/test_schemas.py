@@ -282,6 +282,48 @@ def test_style_profile_duration_stats_ordered():
     assert profile.version == 1
 
 
+@pytest.mark.parametrize("explicit_none", [False, True])
+def test_unmeasured_energy_curve_preserves_profile_bytes(explicit_none: bool) -> None:
+    old = (
+        '{"version":1,"source_refs":[],"shot_duration_s":{"p10":1.0,"median":2.0,"p90":4.0},'
+        '"cuts_per_min":20.0,"beat_aligned_ratio":null,"music_bpm":120.0,"bpm_range":null,'
+        '"intro_s":null,"cold_open_clips":0,"speech_ratio":null,"transitions":null,'
+        '"structure":null,"look":null,'
+        '"subtitle":{"present":false,"position":null,"relative_size":null},"notes":""}'
+    )
+    profile = StyleProfile.model_validate_json(old)
+    assert profile.energy_curve is None
+    if explicit_none:
+        profile = StyleProfile(**profile.model_dump(), energy_curve=None)
+    assert "energy_curve" not in profile.model_dump()
+    assert profile.model_dump_json().encode() == old.encode()
+
+
+@pytest.mark.parametrize(
+    "curve",
+    [[], [0.5] * 9, [0.5] * 11]
+    + [[bad] + [0.5] * 9 for bad in (-0.1, 1.1, float("nan"), float("inf"), float("-inf"))],
+)
+def test_energy_curve_rejects_invalid_values(curve: list[float]) -> None:
+    with pytest.raises(ValidationError, match="energy_curve"):
+        StyleProfile(
+            shot_duration_s=DurationStats(p10=1, median=2, p90=4),
+            cuts_per_min=20,
+            energy_curve=curve,
+        )
+
+
+def test_measured_energy_curve_round_trips() -> None:
+    curve = [0.0, 1.0] + [0.123456] * 8
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1, median=2, p90=4),
+        cuts_per_min=20,
+        energy_curve=curve,
+    )
+    assert profile.model_dump()["energy_curve"] == curve
+    assert StyleProfile.model_validate_json(profile.model_dump_json()) == profile
+
+
 def test_old_profile_json_has_unmeasured_music_bpm() -> None:
     profile = StyleProfile.model_validate_json(
         '{"shot_duration_s":{"p10":1,"median":2,"p90":4},"cuts_per_min":20}'

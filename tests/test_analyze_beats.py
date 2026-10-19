@@ -6,12 +6,38 @@ from vlogcut.analyze.beats import (
     BeatParams,
     beat_aligned_ratio,
     detect_beats,
+    energy_curve,
     estimate_tempo,
     onset_envelope,
     track_beats,
 )
 
 np = pytest.importorskip("numpy")
+
+
+def test_energy_curve_ramp_and_gain_invariance() -> None:
+    samples = np.arange(103, dtype=float)
+    original = samples.copy()
+    curve = energy_curve(samples, 22050)
+    assert len(curve) == 10
+    assert all(a < b for a, b in zip(curve, curve[1:], strict=False))
+    assert max(curve) == 1.0
+    for gain in (1e-200, -3.0, 1e200):
+        assert energy_curve(samples * gain, 16000) == pytest.approx(curve)
+    np.testing.assert_array_equal(samples, original)
+
+
+@pytest.mark.parametrize("samples", [np.empty(0), np.ones(9), np.zeros(100)])
+def test_energy_curve_unmeasured(samples: np.ndarray) -> None:
+    assert energy_curve(samples, 22050) is None
+
+
+def test_energy_curve_constant_and_rms_bins() -> None:
+    assert energy_curve(np.full(103, -0.3), 22050) == pytest.approx([1.0] * 10)
+    # Equal spans have boundaries 0, 2, 5; include the final sample and use RMS.
+    assert energy_curve(np.array([0, 2, 0, 0, 3]), 22050, bins=2) == pytest.approx(
+        [(2 / 3) ** 0.5, 1.0]
+    )
 
 
 def _clicks(

@@ -189,6 +189,7 @@ class StyleProfile(BaseModel):
     cuts_per_min: float = Field(gt=0)
     beat_aligned_ratio: float | None = Field(default=None, ge=0, le=1)  # None = not measured
     music_bpm: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    energy_curve: list[float] | None = None  # ten normalized reference-audio RMS bins
     bpm_range: tuple[float, float] | None = None
     intro_s: float | None = None
     # User-set leading clips exempt from chronology; 0 disables cold opens.
@@ -202,11 +203,20 @@ class StyleProfile(BaseModel):
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        # Preserve existing profile JSON bytes when tempo was not measured.
+        # Preserve existing profile JSON bytes when audio dimensions were not measured.
         data = handler(self)
         if self.music_bpm is None:
             data.pop("music_bpm", None)
+        if self.energy_curve is None:
+            data.pop("energy_curve", None)
         return data
+
+    @field_validator("energy_curve")
+    @classmethod
+    def _check_energy_curve(cls, value: list[float] | None) -> list[float] | None:
+        if value is not None and (len(value) != 10 or any(not 0 <= v <= 1 for v in value)):
+            raise ValueError("energy_curve must contain exactly 10 finite values in [0, 1]")
+        return value
 
     @field_validator("look", mode="before")
     @classmethod

@@ -43,7 +43,7 @@ class ReferenceParams(BaseModel):
     dissolves: bool = True  # also find cross-dissolves / fades (analyze.transitions)
     black_fade_max_gap_s: float = Field(default=transitions.BLACK_FADE_MAX_GAP_S, ge=0)
     black_fade_max_luma: float = Field(default=transitions.BLACK_FADE_MAX_LUMA, ge=0, le=1)
-    beats: bool = True  # measure alignment and tempo of the reference's own audio
+    beats: bool = True  # measure alignment, tempo and energy of the reference's own audio
     look: bool = True  # sample RGB appearance from the proxy
 
 
@@ -59,6 +59,7 @@ class ReferenceCuts(BaseModel):
     cuts: list[float]  # hard cuts + dissolve midpoints, seconds
     dissolve_cuts: list[float]  # required: old caches must be recomputed
     beats: list[float]  # sorted reference-timeline seconds; required for cache invalidation
+    energy_curve: list[float] | None = None
     look: LookStats | None = None
 
     @model_validator(mode="after")
@@ -201,6 +202,18 @@ def pooled_bpm(beat_lists: Sequence[Sequence[float]]) -> float | None:
     return 60 / statistics.median(intervals) if intervals else None
 
 
+def pooled_energy_curve(refs: Sequence[ReferenceCuts]) -> list[float] | None:
+    """Duration-weighted mean of measured curves, rounded to six decimals."""
+    measured = [ref for ref in refs if ref.energy_curve is not None]
+    total_s = sum(ref.duration_s for ref in measured)
+    if not total_s:
+        return None
+    return [
+        round(sum(ref.duration_s * ref.energy_curve[i] for ref in measured) / total_s, 6)
+        for i in range(10)
+    ]
+
+
 def pooled_beat_ratio(
     refs: Sequence[ReferenceCuts], per_ref_cuts: Sequence[Sequence[float]]
 ) -> float | None:
@@ -225,6 +238,7 @@ def profile_from_durations(
     n_dissolves: int | None = None,
     beat_ratio: float | None = None,
     music_bpm: float | None = None,
+    energy_curve: list[float] | None = None,
     look_stats: Sequence[LookStats | None] = (),
 ) -> StyleProfile:
     """Pool finished edits into one profile: a single duration distribution over all
@@ -261,6 +275,7 @@ def profile_from_durations(
         ),
         beat_aligned_ratio=beat_ratio,
         music_bpm=music_bpm,
+        energy_curve=energy_curve,
         look=look.pool_look(look_stats),
         notes=notes,
     )
@@ -286,6 +301,11 @@ def aggregate(refs: Sequence[ReferenceCuts], params: ReferenceParams) -> StylePr
         n_dissolves=n_dissolves,
         music_bpm=(
             pooled_bpm([r.beats for r in refs])
+            if params.beats and all(r.params.beats for r in refs)
+            else None
+        ),
+        energy_curve=(
+            pooled_energy_curve(refs)
             if params.beats and all(r.params.beats for r in refs)
             else None
         ),
@@ -340,14 +360,16 @@ def analyze_reference(
             cuts, found, params.min_shot_s, transition_cuts=boundaries
         )
     beats = []
+    measured_energy = None
     if params.beats and asset.has_audio:
-        from vlogcut.analyze.beats import BeatParams, detect_beats
+        from vlogcut.analyze.beats import BeatParams, detect_beats, energy_curve
         from vlogcut.analyze.pauses import load_mono_audio
 
         sample_rate = BeatParams().sample_rate
         samples = load_mono_audio(asset.proxy_path, sample_rate)
         if samples is not None:
             beats = sorted(detect_beats(samples, sample_rate).beats)
+            measured_energy = energy_curve(samples, sample_rate)
     measured_look = None
     if params.look:
         # About 1 fps for short references; spread at most 32 samples over longer ones.
@@ -359,6 +381,7 @@ def analyze_reference(
     record = ReferenceCuts(
         asset_id=asset.asset_id, source=str(path), duration_s=asset.duration_s, params=params,
         cuts=cuts, dissolve_cuts=dissolve_cuts, beats=beats, look=measured_look,
+        energy_curve=measured_energy,
     )  # fmt: skip
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = cache_path.with_suffix(".part")
@@ -414,7 +437,10 @@ def _load_cache(
         and not {"black_fade_max_gap_s", "black_fade_max_luma"} <= record.params.model_fields_set
     ):
         return None
-    if params.beats and "beats" not in record.params.model_fields_set:
+    if params.beats and (
+        "beats" not in record.params.model_fields_set
+        or "energy_curve" not in record.model_fields_set
+    ):
         return None
     if params.look and (
         "look" not in record.model_fields_set or "look" not in record.params.model_fields_set
