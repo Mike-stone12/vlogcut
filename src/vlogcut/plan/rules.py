@@ -13,6 +13,7 @@ Week-1 baseline and, later, the fallback when the planner's EDL cannot be repair
 5. place each clip in the middle of the usable part; shots kept for their audio
    (someone talking) start at the beginning of the usable part and run as long as the
    pacing allows, so speech is less likely to be cut mid-sentence
+6. shift the rounded, fixed-length windows onto nearby cut-point candidates
 
 `score` is pluggable so highlight features (faces, audio peaks, ...) can replace the
 quality-only default later.
@@ -160,7 +161,7 @@ def place_on_cut_points(
     Only position changes, never clip length. Feasibility allows 1e-9 s tolerance.
     Choose the smallest shift within max_shift_s, if given; ties prefer both ends
     on candidates, then the earlier in-point. With no qualifying placement, return
-    the default unchanged. This helper is not yet wired into rough_cut.
+    the default unchanged.
     """
     tolerance = 1e-9
     if length_s <= 0:
@@ -259,7 +260,10 @@ def rough_cut(
     params: RoughCutParams | None = None,
     profile: StyleProfile | None = None,
     score: Callable[[Shot], float] = score_shot,
+    *,
+    max_shift_s: float | None = 1.0,
 ) -> EDL:
+    """Build a rough cut, shifting onto candidates by at most max_shift_s (None: unbounded)."""
     params = params or RoughCutParams()
     pace = profile.shot_duration_s if profile else DEFAULT_PACING
     by_id = {a.asset_id: a for a in assets}
@@ -302,6 +306,8 @@ def rough_cut(
     )
     for clip, transition in zip(clips, transitions, strict=True):
         clip.transition_in = transition
+    for clip, candidate in zip(clips, picked, strict=True):
+        _place_clip(clip, candidate, max_shift_s=max_shift_s)
     notes = (
         f"rules/{params.strategy}: {len(clips)} of {len(cands)} usable shots "
         f"({len(shots) - len(cands)} rejected or too short), {total:.1f} s for a "
@@ -337,3 +343,26 @@ def _clip(c: _Candidate, length: float, i: int, n: int, strategy: str) -> Clip:
         out_s=min(round(start + length, 3), c.hi),
         reason=f"rules: {where}, {why}",
     )
+
+
+def _place_clip(clip: Clip, c: _Candidate, *, max_shift_s: float | None = 1.0) -> None:
+    # Preserve the existing rounded length; candidates use absolute source times,
+    # whereas Clip stores offsets from the shot start. Do not round again afterward.
+    length = clip.out_s - clip.in_s
+    if length > c.avail + 1e-9:
+        # Legacy rounding can enlarge a full-window clip; no fixed-length move fits.
+        return
+    origin = c.shot.start_s
+    default = origin + clip.in_s
+    start = place_on_cut_points(
+        origin + c.lo,
+        origin + c.hi,
+        length,
+        default,
+        [point.time_s for point in c.shot.cut_points],
+        max_shift_s=max_shift_s,
+    )
+    if start != default:
+        # Contain the helper's 1e-9 feasibility tolerance at the usable boundaries.
+        clip.in_s = min(max(start - origin, c.lo), c.hi - length)
+        clip.out_s = clip.in_s + length

@@ -15,6 +15,7 @@ from vlogcut.plan.rules import (
     sample_lengths,
 )
 from vlogcut.schemas import (
+    CutPoint,
     DurationStats,
     MediaAsset,
     QualityFlags,
@@ -56,6 +57,97 @@ def _by_id(shots: list[Shot]) -> dict[str, Shot]:
 
 
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("offset", [4.123456, 7.123456])
+def test_rough_cut_aligns_rounded_window_to_nearby_candidate(offset: float) -> None:
+    shot = _shot("a", 10, dur=10, usable_range=(1.0, 9.0))
+    assets = [_asset("a", 0)]
+    params = RoughCutParams(target_s=3.001)
+    plain = rough_cut([shot], assets, params).clips[0]
+    candidate = shot.start_s + offset
+    shot.cut_points = [CutPoint(time_s=candidate, kind="pause")]
+    aligned = rough_cut([shot], assets, params).clips[0]
+    assert (
+        min(abs(shot.start_s + edge - candidate) for edge in (aligned.in_s, aligned.out_s)) < 1e-6
+    )
+    assert aligned.timeline_duration_s == pytest.approx(plain.timeline_duration_s, abs=1e-12)
+    assert (aligned.in_s, aligned.out_s) != (plain.in_s, plain.out_s)
+
+
+def test_rough_cut_max_shift_and_unbounded_placement() -> None:
+    shot = _shot("a", 10, dur=10, usable_range=(1.0, 9.0))
+    assets = [_asset("a", 0)]
+    params = RoughCutParams(target_s=3)
+    plain = rough_cut([shot], assets, params)
+    shot.cut_points = [CutPoint(time_s=108.5, kind="pause")]
+    assert rough_cut([shot], assets, params).model_dump_json() == plain.model_dump_json()
+    for limit in (2.0, None):
+        clip = rough_cut([shot], assets, params, max_shift_s=limit).clips[0]
+        assert shot.start_s + clip.out_s == 108.5
+        assert clip.timeline_duration_s == plain.clips[0].timeline_duration_s
+
+
+@pytest.mark.parametrize("strategy", ["coverage", "highlights"])
+def test_rough_cut_placement_preserves_multi_shot_invariants(strategy: str) -> None:
+    assets = [_asset("a", 0), _asset("b", 60)]
+    shots = [_shot(a.asset_id, i, dur=8, usable_range=(1.0, 7.0)) for a in assets for i in range(6)]
+    shots[2].quality.warnings = ["kept_for_audio"]
+    params = RoughCutParams(target_s=24, strategy=strategy)
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=0.3, median=2, p90=5),
+        cuts_per_min=30,
+        transitions=TransitionMix(hard_cut=0.5, dissolve=0.5),
+    )
+    plain = rough_cut(shots, assets, params, profile)
+    by_id = _by_id(shots)
+    for i, clip in enumerate(plain.clips):
+        shot = by_id[clip.shot_id]
+        if i % 3 != 0 or "kept_for_audio" in shot.quality.warnings:
+            shot.cut_points = [
+                CutPoint(time_s=shot.start_s + offset, kind="pause")
+                for offset in (0.5, clip.in_s + 0.125, 7.5)
+            ]
+    aligned = rough_cut(shots, assets, params, profile)
+    assert any(a.in_s != b.in_s for a, b in zip(plain.clips, aligned.clips, strict=True))
+    assert aligned.model_dump(exclude={"clips"}) == plain.model_dump(exclude={"clips"})
+    assert aligned.total_duration_s == pytest.approx(plain.total_duration_s, abs=1e-12)
+    for a, b in zip(plain.clips, aligned.clips, strict=True):
+        assert a.model_dump(exclude={"in_s", "out_s"}) == b.model_dump(exclude={"in_s", "out_s"})
+        assert b.timeline_duration_s == pytest.approx(a.timeline_duration_s, abs=1e-12)
+        shot = by_id[b.shot_id]
+        lo, hi = shot.quality.usable_range
+        assert shot.start_s <= shot.start_s + b.in_s < shot.start_s + b.out_s <= shot.end_s
+        assert lo <= b.in_s < b.out_s <= hi
+        if not shot.cut_points:
+            assert b == a
+
+
+@pytest.mark.parametrize("usable_end,expected_in", [(9.0, 1.25), (4.0, 1.0)])
+def test_rough_cut_places_audio_shots_unless_window_is_full(
+    usable_end: float, expected_in: float
+) -> None:
+    shot = _shot("a", 10, dur=10, usable_range=(1.0, usable_end), warnings=["kept_for_audio"])
+    shot.cut_points = [CutPoint(time_s=101.25, kind="pause")]
+    clip = rough_cut([shot], [_asset("a", 0)], RoughCutParams(target_s=3)).clips[0]
+    assert clip.in_s == expected_in
+    assert clip.timeline_duration_s == 3
+    assert clip.audio == "keep"
+
+
+@pytest.mark.parametrize("limit", [0.0, 1.0, None])
+def test_rough_cut_no_candidates_matches_legacy_json(
+    monkeypatch: pytest.MonkeyPatch, limit: float | None
+) -> None:
+    shots, assets = _day(5)
+    # Include an awkward full-window rounding case from the previous behaviour.
+    shots[0].quality.usable_range = (0.0004, 4.0004)
+    shots[0].quality.warnings = ["kept_for_audio"]
+    params = RoughCutParams(target_s=180)
+    actual = rough_cut(shots, assets, params, max_shift_s=limit).model_dump_json()
+    monkeypatch.setattr("vlogcut.plan.rules._place_clip", lambda *args, **kwargs: None)
+    legacy = rough_cut(shots, assets, params).model_dump_json()
+    assert actual.encode() == legacy.encode()
 
 
 def test_place_on_cut_points_no_candidates_returns_default() -> None:
