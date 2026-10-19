@@ -118,7 +118,8 @@ flags are skipped: references are finished edits), then aggregate:
 - Audio: speech-over-music ratio, whether clip audio is kept under music
 - Look: brightness / saturation / warmth stats measured from reference proxies into
   `StyleProfile.look`, using the pure helper in `analyze/look.py`. Samples are cached
-  per reference and pooled by frame count; distance and planners do not yet use them.
+  per reference and pooled by frame count. Style distance uses all three look
+  dimensions; planners do not yet use them.
 - Text: subtitle presence/position/size (OCR; v1.5)
 - `notes`: short natural-language summary written by a VLM
 - Output: `StyleProfile` JSON — versioned and user-editable (`vlogcut style build`);
@@ -280,7 +281,8 @@ means across references. `None` means not measured (disabled or no sampled frame
 distinct from measured black. Old profile JSON without `look`, or with the previous
 empty `{}` placeholder, loads with `None`; measured values round-trip with frame counts.
 EDL-derived profiles leave look unmeasured. The analysis module re-exports the shared
-model so existing helper imports continue to work.
+model so existing helper imports continue to work. Style distance uses brightness,
+saturation and warmth when both profiles have look; planners still ignore look.
 
 `StyleProfile.structure: StructureStats | None = None` holds measured structure
 dimensions. `StructureStats.montage_share` is a share in [0, 1]. A burst is a
@@ -425,6 +427,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 3 · style: look stats in style distance (style/distance.py)
 - [x] Week 3 · style: look stats from references (schemas.py, style/profile.py)
 
 - [x] Week 4 · plan: LLM planner prompt describes structure dimensions (plan/llm.py)
@@ -484,14 +487,19 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   profile and requires the round trip (via the EDL and via the rendered preview) to land
   within a third of the distance between the two references. The fast-reference EDL
   distance must also be < 0.1 octaves; the rendered-preview distance must be < 0.2.
+  Look measurement is disabled for these comparisons: synthetic footage differs in
+  look from the references, and planners do not match appearance.
 - Style distance (`style/distance.py`): per dimension |log2(a / b)| for the positive
   pacing quantities (shot-duration p10 / median / p90, cuts per minute, and
   `intro_pace` from `structure.intro_pace_ratio`), so the unit is
   octaves (1.0 = twice as fast or slow); absolute difference for the ratio dimensions in
   [0, 1]: `beat_aligned_ratio`, `speech_ratio`, `dissolve` (`transitions.dissolve`),
-  and `montage_share` (`structure.montage_share`);
-  a dimension unmeasured on either side is skipped and reported; equal weights
-  until the eval set says otherwise. `vlogcut style diff a.json b.json` prints it.
+  `montage_share` (`structure.montage_share`), and look `brightness` and `saturation`.
+  Look `warmth` uses |a - b| / 2 to map its [-1, 1] range onto [0, 1].
+  A dimension unmeasured on either side is skipped and reported; if either look is
+  `None`, all three look dimensions are skipped. Total is the mean over measured
+  dimensions with equal weights until the eval set says otherwise.
+  `vlogcut style diff a.json b.json` prints it.
 - ~10 footage sets, each with reference videos
 - Metrics: style distance (shot-duration distribution distance, beat-alignment gap,
   structure / transition-mix distance), constraint violations, repair rounds, cost and
@@ -500,6 +508,14 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: look stats in style distance — compare `StyleProfile.look` brightness
+  and saturation by absolute difference, and warmth by half the absolute difference
+  to normalize its [-1, 1] range. All three dimensions have equal weight alongside
+  existing measured dimensions and appear in the diff table. If either look is
+  `None`, skip all three and list them as unmeasured; existing totals and per-dimension
+  values are unchanged. Disable look measurement in the synthetic round-trip test
+  to retain its pacing thresholds. No schema, measurement or planner changes.
 
 - 2026-10-19: reference look statistics — **schema change**: move `LookStats` from
   the analysis helper into `schemas.py` and replace the profile's dictionary placeholder
