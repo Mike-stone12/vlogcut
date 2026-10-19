@@ -116,9 +116,9 @@ flags are skipped: references are finished edits), then aggregate:
 - Transitions: share of hard cuts / dissolves (from `analyze/transitions.py`); fades
   through black currently count as two dissolves
 - Audio: speech-over-music ratio, whether clip audio is kept under music
-- Look: brightness / saturation / warmth stats (for later matching). A pure helper
-  `analyze/look.py` measures pooled stats from sampled RGB frames; it is not yet
-  wired into `StyleProfile`, distance or planners.
+- Look: brightness / saturation / warmth stats measured from reference proxies into
+  `StyleProfile.look`, using the pure helper in `analyze/look.py`. Samples are cached
+  per reference and pooled by frame count; distance and planners do not yet use them.
 - Text: subtitle presence/position/size (OCR; v1.5)
 - `notes`: short natural-language summary written by a VLM
 - Output: `StyleProfile` JSON — versioned and user-editable (`vlogcut style build`);
@@ -273,6 +273,15 @@ until its analysis is wired in: `None` means "not measured", which is not the sa
 JSON without this field still loads. The mix is unmeasured when dissolve detection is off
 or no cuts survive merging. Profiles still require at least one cut to describe pacing.
 
+`LookStats` holds brightness (mean Rec.709 luma) and saturation (mean HSV saturation)
+in [0, 1], warmth (mean R-B) in [-1, 1], and a positive integer `frames` count.
+All values are finite. `StyleProfile.look: LookStats | None = None` stores frame-weighted
+means across references. `None` means not measured (disabled or no sampled frames),
+distinct from measured black. Old profile JSON without `look`, or with the previous
+empty `{}` placeholder, loads with `None`; measured values round-trip with frame counts.
+EDL-derived profiles leave look unmeasured. The analysis module re-exports the shared
+model so existing helper imports continue to work.
+
 `StyleProfile.structure: StructureStats | None = None` holds measured structure
 dimensions. `StructureStats.montage_share` is a share in [0, 1]. A burst is a
 maximal run of at least three consecutive shots strictly shorter than half the pooled
@@ -416,6 +425,8 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 3 · style: look stats from references (schemas.py, style/profile.py)
+
 - [x] Week 4 · plan: LLM planner prompt describes structure dimensions (plan/llm.py)
 - [x] Week 4 · cache: workspace-relative paths in cached JSON (paths.py, analyze/shots.py, analyze/quality.py, style/profile.py, pipeline.py)
 - [x] Week 5 · feedback: CLI classify subcommand applying profile deltas (cli.py)
@@ -489,6 +500,19 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: reference look statistics — **schema change**: move `LookStats` from
+  the analysis helper into `schemas.py` and replace the profile's dictionary placeholder
+  with optional typed measurements. Sample 64×64 RGB frames from the reference proxy
+  at approximately 1 fps, lowering the rate over long references to spread at most 32
+  frames across the duration; sub-second references request one sample. An explicit
+  ffmpeg output cap enforces the bound. Cache per-reference means and actual frame count,
+  then reuse `pool_look` to weight by sampled frames, skipping unmeasured records.
+  Look is `None` when disabled globally or for any reference, or no frames were sampled.
+  `ReferenceParams.look=True` participates in cache matching; missing look data or a
+  missing look flag invalidates old caches when requested. Explicit cached `look: null`
+  is a valid empty measurement and avoids re-sampling. EDL look remains `None`.
+  Distance, planners, prompts, rendering and colour matching are unchanged.
 
 - 2026-10-19: portable workspace caches — `paths.py` converts paths only at JSON
   read/write boundaries. Shot-span and quality caches store `keyframes` relative

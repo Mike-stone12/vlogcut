@@ -1,4 +1,4 @@
-"""Pooled RGB look measurements and a small-frame decoder; no profile wiring."""
+"""Pooled RGB look measurements and a small-frame decoder."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict, Field
 
 from vlogcut.ingest import ffmpeg
+from vlogcut.schemas import LookStats as LookStats
 
 if TYPE_CHECKING:
     import numpy as np
@@ -21,17 +22,6 @@ class LookParams(BaseModel):
 
     sample_fps: float = Field(default=1.0, gt=0)
     size: int = Field(default=64, ge=8)
-
-
-class LookStats(BaseModel):
-    """Local analysis result; None, rather than a zero result, means unmeasured."""
-
-    model_config = ConfigDict(allow_inf_nan=False)
-
-    brightness: float = Field(ge=0, le=1)
-    saturation: float = Field(ge=0, le=1)
-    warmth: float = Field(ge=-1, le=1)
-    frames: int = Field(ge=1)
 
 
 def look_stats(frames: np.ndarray) -> LookStats | None:
@@ -83,14 +73,19 @@ def pool_look(stats: Sequence[LookStats | None]) -> LookStats | None:
     )
 
 
-def load_rgb_frames(path: str | Path, params: LookParams | None = None) -> np.ndarray:
+def load_rgb_frames(
+    path: str | Path, params: LookParams | None = None, *, max_frames: int | None = None
+) -> np.ndarray:
     """Decode a proxy to uint8 RGB frames, shape (N, size, size, 3).
 
-    Defaults to LookParams() (1 fps, 64x64). Shared ffmpeg errors propagate.
+    Defaults to LookParams() (1 fps, 64x64). Optional cap bounds decoded output.
+    Shared ffmpeg errors propagate.
     """
     import numpy as np
 
     params = params or LookParams()
+    if max_frames is not None and max_frames < 1:
+        raise ValueError("max_frames must be positive")
     size = params.size
     raw = ffmpeg.run_bytes(
         "ffmpeg",
@@ -98,6 +93,9 @@ def load_rgb_frames(path: str | Path, params: LookParams | None = None) -> np.nd
         + [
             "-vf",
             f"fps={params.sample_fps},scale={size}:{size},format=rgb24",
+        ]
+        + (["-frames:v", str(max_frames)] if max_frames is not None else [])
+        + [
             "-f",
             "rawvideo",
             "-",

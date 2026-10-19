@@ -1,7 +1,7 @@
-"""Style profile from reference videos: pacing, structure, transitions and beats.
+"""Style profile from references: pacing, structure, transitions, beats and look.
 
 PoC slice: the shot-duration distribution (p10 / median / p90) and cuts per minute,
-pooled over all references, plus montage-burst share, intro/body pacing, transitions and beats.
+pooled over references, plus montage-burst share, intro/body pacing, transitions, beats and look.
 Other structure dimensions and speech come later.
 
 References are finished edits, so this does not reuse `analyze.detect_shots`: that step
@@ -20,15 +20,16 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
-from vlogcut.analyze import shots, transitions
+from vlogcut.analyze import look, shots, transitions
 from vlogcut.ingest import make_proxy, probe_asset
 from vlogcut.paths import from_workspace, to_workspace_relative
-from vlogcut.schemas import DurationStats, StructureStats, StyleProfile, TransitionMix
+from vlogcut.schemas import DurationStats, LookStats, StructureStats, StyleProfile, TransitionMix
 
 log = logging.getLogger(__name__)
 
 Progress = Callable[[str], None]
 INTRO_S = 20.0
+LOOK_MAX_FRAMES = 32
 
 
 class ReferenceParams(BaseModel):
@@ -40,6 +41,7 @@ class ReferenceParams(BaseModel):
     min_shot_s: float = Field(default=0.25, gt=0)
     dissolves: bool = True  # also find cross-dissolves / fades (analyze.transitions)
     beats: bool = True  # measure alignment to the reference's own audio
+    look: bool = True  # sample RGB appearance from the proxy
 
 
 class ReferenceCuts(BaseModel):
@@ -54,6 +56,7 @@ class ReferenceCuts(BaseModel):
     cuts: list[float]  # hard cuts + dissolve midpoints, seconds
     dissolve_cuts: list[float]  # required: old caches must be recomputed
     beats: list[float]  # sorted reference-timeline seconds; required for cache invalidation
+    look: LookStats | None = None
 
     @model_validator(mode="after")
     def _dissolves_are_cuts(self) -> ReferenceCuts:
@@ -191,12 +194,14 @@ def profile_from_durations(
     *,
     n_dissolves: int | None = None,
     beat_ratio: float | None = None,
+    look_stats: Sequence[LookStats | None] = (),
 ) -> StyleProfile:
     """Pool finished edits into one profile: a single duration distribution over all
     shots, and cuts per minute from the totals, so a short reference does not weigh as
     much as a long one. Each inner sequence is one edit's consecutive shot lengths (it
     sums to the edit's duration and has one cut less than it has shots).
-    `n_dissolves` counts surviving dissolve boundaries; None means not measured."""
+    `n_dissolves` counts surviving dissolve boundaries; None means not measured.
+    `look_stats` pools measured RGB means by frame count; no samples means None."""
     if not per_ref:
         raise StyleError("no references given")
     durations = [d for lengths in per_ref for d in lengths]
@@ -224,6 +229,7 @@ def profile_from_durations(
             else None
         ),
         beat_aligned_ratio=beat_ratio,
+        look=look.pool_look(look_stats),
         notes=notes,
     )
 
@@ -246,6 +252,9 @@ def aggregate(refs: Sequence[ReferenceCuts], params: ReferenceParams) -> StylePr
         [[end - start for start, end in ss] for ss in spans],
         [r.source for r in refs],
         n_dissolves=n_dissolves,
+        look_stats=(
+            [r.look for r in refs] if params.look and all(r.params.look for r in refs) else ()
+        ),
         beat_ratio=(
             pooled_beat_ratio(refs, [[end for _, end in ss[:-1]] for ss in spans])
             if params.beats
@@ -294,9 +303,17 @@ def analyze_reference(
         samples = load_mono_audio(asset.proxy_path, sample_rate)
         if samples is not None:
             beats = sorted(detect_beats(samples, sample_rate).beats)
+    measured_look = None
+    if params.look:
+        # About 1 fps for short references; spread at most 32 samples over longer ones.
+        sample_fps = max(1 / asset.duration_s, min(1.0, LOOK_MAX_FRAMES / asset.duration_s))
+        frames = look.load_rgb_frames(
+            asset.proxy_path, look.LookParams(sample_fps=sample_fps), max_frames=LOOK_MAX_FRAMES
+        )
+        measured_look = look.look_stats(frames)
     record = ReferenceCuts(
         asset_id=asset.asset_id, source=str(path), duration_s=asset.duration_s, params=params,
-        cuts=cuts, dissolve_cuts=dissolve_cuts, beats=beats,
+        cuts=cuts, dissolve_cuts=dissolve_cuts, beats=beats, look=measured_look,
     )  # fmt: skip
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = cache_path.with_suffix(".part")
@@ -312,7 +329,7 @@ def build_profile(
     params: ReferenceParams | None = None,
     progress: Progress = log.info,
 ) -> StyleProfile:
-    """Reference videos -> `StyleProfile` (pacing, transition mix and beat alignment)."""
+    """Reference videos -> `StyleProfile`, including cached RGB look measurements."""
     params = params or ReferenceParams()
     refs = []
     for i, path in enumerate(paths, 1):
@@ -346,6 +363,10 @@ def _load_cache(
     except (ValidationError, ValueError):
         return None
     if record.asset_id != asset_id or record.params != params:
+        return None
+    if params.look and (
+        "look" not in record.model_fields_set or "look" not in record.params.model_fields_set
+    ):
         return None
     record.source = str(from_workspace(record.source, workspace))
     return record

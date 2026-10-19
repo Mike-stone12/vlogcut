@@ -8,9 +8,11 @@ import pytest
 from pydantic import ValidationError
 
 from vlogcut.analyze import beats as beats_mod
+from vlogcut.analyze import look as look_mod
 from vlogcut.analyze import pauses as pauses_mod
 from vlogcut.analyze import shots as shots_mod
-from vlogcut.schemas import MediaAsset
+from vlogcut.ingest import ffmpeg
+from vlogcut.schemas import LookStats, MediaAsset
 from vlogcut.style import ReferenceParams, StyleError, build_profile, load_profile
 from vlogcut.style import profile as profile_mod
 from vlogcut.style.profile import (
@@ -29,6 +31,133 @@ from vlogcut.style.profile import (
 # ---------------------------------------------------------------------------
 # pure aggregation
 # ---------------------------------------------------------------------------
+
+
+def test_aggregate_look_weights_sampled_frames() -> None:
+    a, b, unmeasured = [_ref(name, 60, [20]) for name in ("a", "b", "c")]
+    a.look = LookStats(brightness=1, saturation=0, warmth=-1, frames=1)
+    b.look = LookStats(brightness=0, saturation=1, warmth=1, frames=3)
+    result = aggregate([a, b, unmeasured], ReferenceParams()).look
+    assert result == LookStats(brightness=0.25, saturation=0.75, warmth=0.5, frames=4)
+    assert aggregate([unmeasured], ReferenceParams()).look is None
+    assert aggregate([a, b], ReferenceParams(look=False)).look is None
+    b.params.look = False
+    assert aggregate([a, b], ReferenceParams()).look is None
+
+
+@pytest.fixture
+def stub_reference(monkeypatch: pytest.MonkeyPatch) -> MediaAsset:
+    asset = MediaAsset(
+        asset_id="a", path="a.mp4", proxy_path="proxy.mp4", duration_s=120,
+        fps=30, width=64, height=64, has_audio=False,
+    )  # fmt: skip
+    monkeypatch.setattr(profile_mod, "probe_asset", lambda path: asset)
+    monkeypatch.setattr(profile_mod, "make_proxy", lambda asset, ws: asset)
+    monkeypatch.setattr(shots_mod, "detect_cuts", lambda *a, **k: [10, 20])
+    return asset
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_build_look_cache_hit_without_resampling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_reference: MediaAsset, empty: bool
+) -> None:
+    measured = None if empty else LookStats(brightness=0.5, saturation=0, warmth=0, frames=3)
+    frame_batch = object()
+
+    def load(path: str, params: look_mod.LookParams, *, max_frames: int) -> object:
+        assert path == stub_reference.proxy_path
+        assert params.size == 64
+        assert params.sample_fps * stub_reference.duration_s == pytest.approx(32)
+        assert max_frames == 32
+        return frame_batch
+
+    def measure(frames: object) -> LookStats | None:
+        assert frames is frame_batch
+        return measured
+
+    monkeypatch.setattr(look_mod, "load_rgb_frames", load)
+    monkeypatch.setattr(look_mod, "look_stats", measure)
+    params = ReferenceParams(dissolves=False, beats=False)
+    first = build_profile(["a.mp4"], tmp_path, params)
+    assert (first.look is None) == empty
+    if not empty:
+        assert first.look.brightness == 0.5
+        assert first.look.frames == 3
+    cache = tmp_path / "style/a.cuts.json"
+    stored = ReferenceCuts.model_validate_json(cache.read_text(encoding="utf-8"))
+    assert stored.look == first.look
+    monkeypatch.setattr(look_mod, "load_rgb_frames", lambda *a, **k: pytest.fail("resampled"))
+    monkeypatch.setattr(shots_mod, "detect_cuts", lambda *a, **k: pytest.fail("redetected"))
+    assert build_profile(["a.mp4"], tmp_path, params) == first
+
+
+@pytest.mark.parametrize("missing", ["stats", "flag", "both"])
+def test_old_look_cache_and_flag_changes_recompute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_reference: MediaAsset, missing: str
+) -> None:
+    params = ReferenceParams(dissolves=False, beats=False)
+    old = _ref("a", 120, [10]).model_dump()
+    old["params"] = params.model_dump()
+    if missing in ("stats", "both"):
+        old.pop("look")
+    if missing in ("flag", "both"):
+        old["params"].pop("look")
+    cache = tmp_path / "style/a.cuts.json"
+    cache.parent.mkdir()
+    cache.write_text(json.dumps(old), encoding="utf-8")
+    monkeypatch.setattr(look_mod, "load_rgb_frames", lambda *a, **k: object())
+    monkeypatch.setattr(
+        look_mod,
+        "look_stats",
+        lambda frames: LookStats(brightness=0, saturation=0, warmth=0, frames=2),
+    )
+    first = build_profile(["a.mp4"], tmp_path, params)
+    assert first.look == LookStats(brightness=0, saturation=0, warmth=0, frames=2)
+    assert json.loads(cache.read_text(encoding="utf-8"))["params"]["look"] is True
+    with monkeypatch.context() as disabled:
+        disabled.setattr(look_mod, "load_rgb_frames", lambda *a, **k: pytest.fail("disabled"))
+        assert (
+            build_profile(["a.mp4"], tmp_path, params.model_copy(update={"look": False})).look
+            is None
+        )
+        assert json.loads(cache.read_text(encoding="utf-8"))["params"]["look"] is False
+    assert build_profile(["a.mp4"], tmp_path, params).look == first.look
+
+
+@pytest.mark.ffmpeg
+def test_bright_and_dark_reference_look(
+    make_clip: Callable[..., Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("numpy")
+    source = make_clip(duration=2, audio=False)
+    # Isolate RGB analysis from scene detection; both references have two known shots.
+    monkeypatch.setattr(shots_mod, "detect_cuts", lambda *a, **k: [1])
+    profiles = []
+    for name, brightness in [("bright", 1), ("dark", -1)]:
+        path = tmp_path / f"{name}.mp4"
+        ffmpeg.run(
+            "ffmpeg",
+            [
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                str(source),
+                "-vf",
+                f"eq=brightness={brightness}",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                str(path),
+            ],
+        )
+        profiles.append(build_profile([path], tmp_path / "ws", ReferenceParams(dissolves=False)))
+    bright, dark = [p.look for p in profiles]
+    assert bright is not None and dark is not None
+    assert bright.brightness > dark.brightness + 0.8
+    assert 1 <= bright.frames <= 32 and 1 <= dark.frames <= 32
 
 
 def test_shot_durations_merges_slivers_and_covers_the_clip():
@@ -335,7 +464,7 @@ def test_analyze_reference_records_only_surviving_dissolves(
         return [10, 20]
 
     monkeypatch.setattr(profile_mod.transitions, "merge_cuts", merge_cuts)
-    record = analyze_reference("a.mp4", tmp_path)
+    record = analyze_reference("a.mp4", tmp_path, ReferenceParams(look=False))
     assert record.cuts == [10, 20]
     assert record.dissolve_cuts == [record.cuts[1]]
     cached = tmp_path / "style" / "a.cuts.json"
@@ -349,7 +478,7 @@ def test_analyze_reference_records_only_surviving_dissolves(
 def test_old_reference_cache_is_recomputed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, detection: bool, invalid_subset: bool
 ) -> None:
-    params = ReferenceParams(dissolves=detection)
+    params = ReferenceParams(dissolves=detection, look=False)
     old = _ref("a", 60, [10]).model_dump(exclude={"dissolve_cuts"})
     if invalid_subset:
         old["dissolve_cuts"] = [20]
@@ -389,7 +518,7 @@ def test_old_reference_cache_is_recomputed(
 def test_old_beat_cache_is_recomputed_and_beats_switch_invalidates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    params = ReferenceParams(dissolves=False)
+    params = ReferenceParams(dissolves=False, look=False)
     old = _ref("a", 60, [10]).model_dump(exclude={"beats"})
     old["params"] = params.model_dump(exclude={"beats"})
     cache = tmp_path / "style" / "a.cuts.json"
@@ -449,7 +578,7 @@ def test_reference_without_audio_has_no_beats(
         lambda *a: None if has_audio else pytest.fail("decoded asset without audio"),
     )
     monkeypatch.setattr(beats_mod, "detect_beats", lambda *a: pytest.fail("detected no audio"))
-    record = analyze_reference("a.mp4", tmp_path, ReferenceParams(dissolves=False))
+    record = analyze_reference("a.mp4", tmp_path, ReferenceParams(dissolves=False, look=False))
     assert record.beats == []
 
 

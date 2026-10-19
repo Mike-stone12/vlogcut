@@ -17,7 +17,14 @@ from vlogcut.feedback import (
     parse_classification,
 )
 from vlogcut.llm.router import ModelRouter
-from vlogcut.schemas import DurationStats, Feedback, StructureStats, StyleProfile, TransitionMix
+from vlogcut.schemas import (
+    DurationStats,
+    Feedback,
+    LookStats,
+    StructureStats,
+    StyleProfile,
+    TransitionMix,
+)
 
 
 class FakeClient:
@@ -56,7 +63,7 @@ def profile() -> StyleProfile:
         bpm_range=(100, 120),
         intro_s=12,
         speech_ratio=0.4,
-        look={"brightness": 0.6},
+        look=LookStats(brightness=0.6, saturation=0.2, warmth=0.1, frames=4),
         notes="Original notes. ",
     )
 
@@ -185,7 +192,8 @@ def test_apply_delta(profile: StyleProfile, factor: float | None, share: float |
     assert result.notes.startswith(profile.notes + "\nApplied profile delta: ")
     assert StyleProfile.model_validate_json(result.model_dump_json()) == result
     result.source_refs.append("new.mp4")
-    result.look["brightness"] = 0
+    assert result.look is not None
+    result.look.brightness = 0
     assert result.structure is not None
     result.structure.montage_share = 0
     assert profile.model_dump() == before

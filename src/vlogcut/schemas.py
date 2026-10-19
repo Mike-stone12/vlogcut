@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # Ingest / analyze
@@ -151,6 +151,17 @@ class StructureStats(BaseModel):
     intro_pace_ratio: float | None = Field(default=None, gt=0)  # None = not measured
 
 
+class LookStats(BaseModel):
+    """Pooled RGB measurements; None, rather than zero, means unmeasured."""
+
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    brightness: float = Field(ge=0, le=1)
+    saturation: float = Field(ge=0, le=1)
+    warmth: float = Field(ge=-1, le=1)
+    frames: int = Field(ge=1)
+
+
 class StyleProfile(BaseModel):
     """Explicit, editable description of a creator's editing style."""
 
@@ -166,9 +177,15 @@ class StyleProfile(BaseModel):
     speech_ratio: float | None = Field(default=None, ge=0, le=1)  # None = not measured
     transitions: TransitionMix | None = None  # None = not measured
     structure: StructureStats | None = None  # None = not measured
-    look: dict[str, float] = Field(default_factory=dict)  # brightness, saturation, warmth...
+    look: LookStats | None = None  # None = not measured
     subtitle: SubtitleStyle = Field(default_factory=SubtitleStyle)
     notes: str = ""  # short natural-language summary
+
+    @field_validator("look", mode="before")
+    @classmethod
+    def _legacy_empty_look(cls, value: object) -> object:
+        # Previously serialized profiles used an empty dict for unmeasured look.
+        return None if value == {} else value
 
 
 # ---------------------------------------------------------------------------
