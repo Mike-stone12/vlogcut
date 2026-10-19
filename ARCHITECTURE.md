@@ -91,6 +91,8 @@ Run shot detection, transitions, VAD and (later) captions on reference videos (q
 flags are skipped: references are finished edits), then aggregate:
 - Pacing: shot-duration p10/median/p90, cuts per minute, pacing curve (intro vs body)
 - Music: BPM, beat-aligned cut ratio (cut within ±80 ms of a beat), energy curve
+  (beat detection and alignment measurement exist in the pure `analyze/beats.py`
+  module; reference analysis and chosen-music integration remain unwired)
 - Structure ("grammar"): intro length, speech ratio, talking ↔ b-roll alternation
   (transition counts between shot kinds), montage bursts (runs of short shots), cold
   open present or not. Pacing alone reads as a speed slider; structure is what makes a
@@ -194,8 +196,8 @@ sorted, unique, and strictly inside the shot; they need not be inside `usable_ra
 (the planner decides that). The field defaults to an empty list, so old shot JSON
 still loads. `kind` is only `pause` for now; other kinds will add literals later.
 
-`StyleProfile.beat_aligned_ratio` and `speech_ratio` are `None` until the beat / speech
-analysis exists: `None` means "not measured", which is not the same as 0.
+`StyleProfile.beat_aligned_ratio` and `speech_ratio` remain `None` until their analysis
+is wired into profile building: `None` means "not measured", which is not the same as 0.
 `StyleProfile.transitions: TransitionMix | None = None` follows the same convention:
 `hard_cut` and `dissolve` are shares in [0, 1], summing to 1 within 1e-6. Old profile
 JSON without this field still loads. The mix is unmeasured when dissolve detection is off
@@ -652,6 +654,23 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   violation's clip index when present, code and message. Violations are non-fatal:
   rendering continues and a successful cut still exits 0. Repair, fallback fixes
   and beat snapping remain planned.
+
+- 2026-10-28: beat detection — `analyze/beats.py` is a pure NumPy module over mono
+  samples, with lazy imports and no schema change. Defaults: 22050 Hz reference
+  rate, centered 1024-sample energy frames / 512-sample hops (durations scale to
+  the supplied input rate without resampling), 60–200 BPM, and 0.08 s alignment
+  tolerance. Positive log-energy differences have a centered 200 ms mean removed.
+  Mean-centered autocorrelation requires at least two slowest periods and a 0.3
+  normalized peak; three-tap smoothing and a shorter-period tie-break within 25%
+  of the strongest peak reduce half-time errors. Parabolic peak refinement over
+  up to four periods limits grid drift. A fixed-period grid maximizes summed
+  onsets over phase, then snaps within 10% of a period to supported local peaks.
+  Silence, short or structureless audio returns `BeatResult(None, [])`.
+  `beat_aligned_ratio` uses inclusive ±80 ms by default (1e-12 s floating-point
+  allowance); empty cuts or beats return `None` (not measured), distinct from 0.
+  Known gaps: tempo octave errors on real music and no tempo changes. There is no
+  caching or wiring into the pipeline, style profiles, planner or validation;
+  beat snapping remains planned. The `MusicTrack` storage question remains open.
 
 ## Open questions
 
