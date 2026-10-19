@@ -306,6 +306,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · plan: rules planner avoids back-to-back dup_group clips (plan/rules.py)
 - [x] Week 4 · validate: deterministic repair wired into pipeline.cut after checks (pipeline.py, cli.py)
 - [x] Week 4 · validate: deterministic repair helper for unknown/rejected clips and transitions (validate/repair.py)
 - [x] Week 4 · validate: checks run on every planned EDL, reported by the CLI (pipeline.py, cli.py)
@@ -655,8 +656,9 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   `schemas.py`. Checks now run after planning in `pipeline.cut`, writing
   `edl/<stem>.violations.json`; the CLI reports them and violations are non-fatal.
   Repair, fallback fixes and beat snapping remain planned. The rules planner can still
-  miss the requested target when footage is insufficient and does not deduplicate;
-  validation reports those cases without relaxing the checks.
+  miss the requested target when footage is insufficient; it now avoids adjacent
+  duplicate groups when a suitable alternative exists (2026-11-02). Validation
+  reports remaining cases without relaxing the checks.
 
 - 2026-10-27: validate pipeline wiring — every EDL planned by `pipeline.cut` is
   checked with the analyzed shots, requested target and optional style profile.
@@ -739,6 +741,19 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   false; the CLI prints one repair line before the validation summary when true,
   with unchanged exit codes. Bounds, chronology, duplicate, target and pacing
   violations are still not repaired; no schema changes, LLM loop or beat snapping.
+
+- 2026-11-02: rules planner adjacent duplicate avoidance — after chronological
+  selection and before length sampling/fitting, `plan/rules.avoid_adjacent_duplicates`
+  scans picks left to right. When neighbours share a non-None `dup_group`, replace
+  the later pick with the best unselected alternative from its coverage bin
+  (including bins of moments), or from all candidates for highlights. Alternatives
+  must remain between the neighbouring picks and conflict with neither side.
+  Higher scores win, then earlier chronological order. None groups never conflict.
+  If no alternative qualifies, keep the original pick for validation to report;
+  the helper never changes the pick count. It runs on each selection attempt in
+  the existing length-fitting loop; sampling, fitting, placement, transitions and
+  clip audio then use the final picks as before. With no shared non-None groups,
+  EDL JSON is unchanged. Group computation and deterministic repair are unchanged.
 
 ## Open questions
 
