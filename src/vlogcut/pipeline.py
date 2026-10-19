@@ -131,6 +131,7 @@ def analyze(
     *,
     workers: int = 1,
     caption: bool = False,
+    motion_cuts: bool = False,
     router: ModelRouter | None = None,
 ) -> list[Shot]:
     """Analyze in input order, then optionally caption sequentially via the router."""
@@ -140,6 +141,7 @@ def analyze(
         raise ValueError("caption=True requires a ModelRouter")
     from vlogcut.analyze import assess_shots, detect_shots  # heavy optional deps
     from vlogcut.analyze.kind import classify_kind
+    from vlogcut.analyze.motion_cuts import merge_cut_points
     from vlogcut.analyze.pauses import analyze_pauses, cut_points_for_span
 
     shots: list[Shot] = []
@@ -147,14 +149,18 @@ def analyze(
 
     def analyze_asset(i: int, asset: MediaAsset) -> list[Shot]:
         progress(f"[{i}/{len(assets)}] analyze {Path(asset.path).name}")
-        asset_shots = assess_shots(asset, detect_shots(asset, workspace), workspace)
+        motion_options = {"motion_cuts": True} if motion_cuts else {}
+        asset_shots = assess_shots(
+            asset, detect_shots(asset, workspace), workspace, **motion_options
+        )
         progress(f"[{i}/{len(assets)}] pauses {Path(asset.path).name}")
         midpoints = [pause.mid_s for pause in analyze_pauses(asset, workspace)]
         for shot in asset_shots:
             # Backfill legacy quality-cache records without re-analyzing media.
             shot.kind = classify_kind(shot)
             # Refresh even on quality-cache hits: old records have no cut points.
-            shot.cut_points = cut_points_for_span(midpoints, shot.start_s, shot.end_s)
+            pauses = cut_points_for_span(midpoints, shot.start_s, shot.end_s)
+            shot.cut_points = merge_cut_points(pauses, shot.cut_points) if motion_cuts else pauses
         return asset_shots
 
     def step(i: int, asset: MediaAsset) -> list[Shot]:
@@ -240,6 +246,7 @@ def cut(
     planner: Literal["rules", "llm"] = "rules",
     router: ModelRouter | None = None,
     caption: bool = False,
+    motion_cuts: bool = False,
     brief: str | None = None,
     constraints: Sequence[str] | None = None,
     ranker: RankerModel | None = None,
@@ -303,7 +310,10 @@ def cut(
         caption=caption,
     )
     caption_options = {"caption": True, "router": router} if caption else {}
-    shots = analyze(assets, workspace, progress, **worker_options, **caption_options)
+    motion_options = {"motion_cuts": True} if motion_cuts else {}
+    shots = analyze(
+        assets, workspace, progress, **worker_options, **caption_options, **motion_options
+    )
     ranker_scores = {shot.shot_id: score(ranker, shot) for shot in shots} if ranker else None
 
     progress(

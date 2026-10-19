@@ -2,8 +2,24 @@ from __future__ import annotations
 
 import pytest
 
-from vlogcut.analyze.motion_cuts import merge_cut_points, motion_cut_points
+from vlogcut.analyze.motion_cuts import (
+    camera_motion_cut_points,
+    merge_cut_points,
+    motion_cut_points,
+)
 from vlogcut.schemas import CutPoint, QualityFlags, Shot
+
+
+def test_camera_steps_use_magnitude_and_destination_frame_time() -> None:
+    motion = [(3, 4), (0, 0), (-3, -4), (0, 0), (4, -3)]
+    assert camera_motion_cut_points(motion, 2, 10, 13) == [
+        CutPoint(time_s=11, kind="motion"),
+        CutPoint(time_s=12, kind="motion"),
+    ]
+    # A decode may overshoot the shot; exclude minima at or beyond its end.
+    assert camera_motion_cut_points(motion, 2, 10, 12) == [CutPoint(time_s=11, kind="motion")]
+    assert camera_motion_cut_points([], 2, 10, 13) == []
+    assert camera_motion_cut_points([(3, 4)], 2, 10, 13) == []
 
 
 def test_v_shaped_dip_uses_absolute_sample_time() -> None:

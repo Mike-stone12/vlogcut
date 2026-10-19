@@ -106,8 +106,24 @@ def test_parser_defaults():
     assert args.style is None and args.music is None
     assert args.jobs == 1
     assert not args.caption
+    assert not args.motion_cuts
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["cut", "day1", "--strategy", "random"])
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_motion_cuts_forwarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled: bool
+) -> None:
+    def cut(*args: object, **kwargs: object) -> CutResult:
+        assert kwargs["motion_cuts"] is enabled
+        return _cut_result(tmp_path, [])
+
+    monkeypatch.setattr("vlogcut.pipeline.cut", cut)
+    argv = ["cut", str(tmp_path), "--no-render"]
+    if enabled:
+        argv.append("--motion-cuts")
+    assert cli.main(argv) == 0
 
 
 @pytest.mark.parametrize("jobs", [0, -1])
