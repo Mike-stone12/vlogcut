@@ -142,8 +142,12 @@ Training and scoring run locally on CPU with no new dependencies. Callers decide
 whether to exclude rejected shots. The shot table and rules planner accept optional
 precomputed ranker scores keyed by shot ID, without importing the ranker. The rules
 planner blends 50% existing shot score with 50% within-table ranker percentile;
-ties use average rank, and single or missing scores default to 0.5. Pipeline and
-CLI wiring, draft import and deriving shot pairs from feedback remain planned.
+ties use average rank, and single or missing scores default to 0.5.
+`pipeline.cut(ranker=...)` accepts a trained `RankerModel`; `cut --ranker MODEL_JSON`
+loads and validates it before analysis. Every analyzed shot is scored after optional
+captioning, so interest is available, and scores reach rules planning (including
+LLM-failure fallback) and the LLM prompt. Draft import and deriving shot pairs
+from feedback remain planned.
 No CLIP embedding is used yet. No end-to-end "video → edit" model: there is no data
 for it, it is not explainable, and it would break principle 2.
 
@@ -155,7 +159,8 @@ for it, it is not explainable, and it would break principle 2.
   When supplied, a `rank` column follows interest: two decimals, `-` for missing
   scores, higher = more likely chosen, relative within this table only. Scores for
   supplied shots must be finite; unknown IDs are ignored. Without scores the table
-  is unchanged. Pipeline and CLI wiring remain planned.
+  is unchanged. `cut --ranker MODEL_JSON` supplies scores through `pipeline.cut`
+  and the optional `ranker_scores` argument in `plan/llm.py`.
 - `plan/rules.rough_cut` accepts optional precomputed `ranker_scores` with the same
   higher-is-better convention and finite-value validation for every known shot,
   including rejected or too-short shots; unknown IDs are ignored. Among eligible
@@ -164,8 +169,10 @@ for it, it is not explainable, and it would break principle 2.
   missing scores get 0.5. Blend `0.5 * existing_score + 0.5 * percentile` for
   selection, length assignment and cold-open ranking. The default quality score
   already lies in [0, 1]. None or empty mappings preserve EDL bytes; hard filters,
-  chronology and pacing rules are unchanged. No ranker import is needed, and
-  pipeline and CLI wiring remain planned.
+  chronology and pacing rules are unchanged. No ranker import is needed in the
+  planner: `cut --ranker MODEL_JSON` scores shots in the pipeline and forwards
+  the mapping to both default rules planning and the fallback after LLM failure.
+  Omitting the ranker preserves EDL and prompt bytes.
 - Output: `EDL`; the rules planner aligns an in- or out-point to a cut-point candidate
   when a fixed-length window fits within the usable part and the maximum shift
 - `plan/llm.py` provides deterministic prompt building and EDL parsing via
@@ -460,6 +467,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · plan: opt-in ranker scores in cut via --ranker (pipeline.py, cli.py, plan/llm.py)
 - [x] Week 4 · plan: rules planner blends optional ranker scores (plan/rules.py)
 - [x] Week 4 · plan: optional ranker score column in the planner shot table (plan/shot_table.py)
 - [x] Week 4 · learn: pure-Python pairwise shot ranker (learn/ranker.py)

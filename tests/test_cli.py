@@ -6,10 +6,65 @@ from pathlib import Path
 import pytest
 
 from vlogcut import cli
+from vlogcut.learn.ranker import RankerModel
 from vlogcut.llm.router import ModelRouter
 from vlogcut.pipeline import CutResult, find_footage
 from vlogcut.schemas import EDL, Clip, DurationStats, QualityFlags, Shot, StyleProfile
 from vlogcut.validate import Violation
+
+
+@pytest.mark.parametrize("payload", [None, b"{", b"{}", b"null", b"\xff"])
+@pytest.mark.parametrize("planner", ["rules", "llm"])
+def test_bad_ranker_fails_before_cut(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    payload: bytes | None,
+    planner: str,
+) -> None:
+    path = tmp_path / "ranker.json"
+    if payload is not None:
+        path.write_bytes(payload)
+    monkeypatch.setattr("vlogcut.pipeline.cut", lambda *a, **kw: pytest.fail("started cut"))
+    monkeypatch.setattr(ModelRouter, "from_yaml", lambda *a: pytest.fail("loaded config"))
+    assert cli.main(["cut", "day", "--planner", planner, "--ranker", str(path)]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert len(captured.err.splitlines()) == 1
+    assert captured.err.startswith("vlogcut: error: invalid ranker model")
+    assert str(path) in captured.err
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_ranker_loaded_and_forwarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ranker_model: RankerModel, enabled: bool
+) -> None:
+    path = tmp_path / "ranker.json"
+    path.write_text(ranker_model.model_dump_json(), encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def cut(*args: object, **kwargs: object) -> CutResult:
+        captured.update(kwargs)
+        return _cut_result(tmp_path, [])
+
+    monkeypatch.setattr("vlogcut.pipeline.cut", cut)
+    argv = ["cut", str(tmp_path), "--no-render"]
+    if enabled:
+        argv += ["--ranker", str(path)]
+    assert cli.main(argv) == 0
+    assert captured["ranker"] == (ranker_model if enabled else None)
+    if enabled:
+        assert isinstance(captured["ranker"], RankerModel)
+
+
+def test_ranker_help(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["cut", "--help"])
+    assert exc.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "--ranker MODEL_JSON" in help_text
+    assert "scores only shape selection and length" in help_text
+    assert "hard filters and chronology are unchanged" in help_text
 
 
 @pytest.mark.parametrize(
