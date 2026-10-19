@@ -13,6 +13,7 @@ from vlogcut.plan.rules import (
     _ranker_percentiles,
     apply_cold_open,
     apply_intro_pace,
+    apply_kind_alternation,
     apply_montage,
     assign_lengths,
     assign_transitions,
@@ -35,7 +36,7 @@ from vlogcut.schemas import (
     TransitionMix,
 )
 from vlogcut.style.distance import profile_from_edl
-from vlogcut.style.profile import duration_stats, montage_share
+from vlogcut.style.profile import duration_stats, kind_alternation, montage_share
 from vlogcut.validate.checks import validate_edl
 
 T0 = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
@@ -102,6 +103,202 @@ def test_explicit_kind_controls_talking_placement_and_score(talking: bool) -> No
     assert score_shot(shot) == pytest.approx(0.79 if talking else 0.49)
     edl = rough_cut([shot], [_asset("a", 0)], RoughCutParams(target_s=3))
     assert edl.clips[0].in_s == (0 if talking else 1.5)
+
+
+@pytest.mark.parametrize("strategy", ["coverage", "highlights"])
+@pytest.mark.parametrize("target", [0.0, 1.0])
+def test_rough_cut_kind_alternation_moves_toward_target(strategy: str, target: float) -> None:
+    shots = [_shot("a", i) for i in range(6)]
+    for i, shot in enumerate(shots):
+        shot.kind = "talking" if i % 2 == 0 else "broll"
+    if target == 0:
+        shots[2].kind, shots[3].kind = "broll", "talking"
+    scores = {s.shot_id: float(i % 2 == 0) for i, s in enumerate(shots)}
+    profile = StyleProfile(shot_duration_s=DEFAULT_PACING, cuts_per_min=20)
+    params = RoughCutParams(target_s=9.45, strategy=strategy)
+    assets = [_asset("a", 0)]
+
+    def score(shot: Shot) -> float:
+        return scores[shot.shot_id]
+
+    plain = rough_cut(shots, assets, params, profile, score)
+    profile.structure = StructureStats(montage_share=0, kind_alternation=target)
+    edl = rough_cut(shots, assets, params, profile, score)
+    by_id = _by_id(shots)
+    before = kind_alternation([by_id[c.shot_id].kind for c in plain.clips])
+    after = kind_alternation([by_id[c.shot_id].kind for c in edl.clips])
+    assert before == 1 - target and after == target
+    assert len(edl.clips) == len(plain.clips) == 3
+    assert [c.shot_id for c in edl.clips] == sorted(c.shot_id for c in edl.clips)
+    assert validate_edl(edl, shots, profile, target_s=params.target_s) == []
+    assert (
+        edl.model_dump_json() == rough_cut(shots, assets, params, profile, score).model_dump_json()
+    )
+
+
+@pytest.mark.parametrize("strategy", ["coverage", "highlights"])
+def test_unmeasured_kind_alternation_preserves_edl_bytes(
+    monkeypatch: pytest.MonkeyPatch, strategy: str
+) -> None:
+    shots, assets = _day(4)
+    params = RoughCutParams(target_s=24, strategy=strategy)
+    profile = StyleProfile(shot_duration_s=DEFAULT_PACING, cuts_per_min=20)
+    absent = profile.model_copy(update={"structure": StructureStats(montage_share=0)})
+    explicit_none = StyleProfile.model_validate(
+        {
+            **profile.model_dump(),
+            "structure": {"montage_share": 0, "kind_alternation": None},
+        }
+    )
+    expected = rough_cut(shots, assets, params, absent).model_dump_json().encode()
+
+    def unexpected_swap(*args: object, **kwargs: object) -> list[_Candidate]:
+        pytest.fail("unmeasured alternation must bypass the swap pass")
+
+    monkeypatch.setattr("vlogcut.plan.rules.apply_kind_alternation", unexpected_swap)
+    for unmeasured in (None, profile, absent, explicit_none):
+        assert rough_cut(shots, assets, params, unmeasured).model_dump_json().encode() == expected
+
+
+@pytest.mark.parametrize("ranked,expected", [(False, 1), (True, 3)])
+def test_alternation_uses_blended_scores_and_filters(ranked: bool, expected: int) -> None:
+    shots = [_shot("a", i) for i in range(8)]
+    for i, shot in enumerate(shots):
+        shot.kind = "talking" if i in (0, 2, 4) else "broll"
+    shots[5].quality.rejected = True
+    shots[6].quality.usable_range = (0, 0.5)
+    shots[7].end_s = shots[7].start_s + 0.5
+    scores = dict(zip((s.shot_id for s in shots), [1, 0.3, 1, 0.2, 1, 0.9, 0.9, 0.9], strict=True))
+    ranks = {s.shot_id: r for s, r in zip(shots, [5, 0, 5, 1, 5, 100, 99, 98], strict=True)}
+    profile = StyleProfile(
+        shot_duration_s=DEFAULT_PACING,
+        cuts_per_min=20,
+        structure=StructureStats(montage_share=0, kind_alternation=1),
+    )
+    edl = rough_cut(
+        shots,
+        [_asset("a", 0)],
+        RoughCutParams(target_s=9.45, strategy="highlights"),
+        profile,
+        lambda shot: scores[shot.shot_id],
+        ranker_scores=ranks if ranked else None,
+    )
+    assert [c.shot_id for c in edl.clips] == [shots[i].shot_id for i in (0, expected, 4)]
+    assert validate_edl(edl, shots, profile, target_s=9.45) == []
+
+
+@pytest.mark.parametrize("tie", ["score", "start", "id"])
+def test_alternation_swap_priority_and_purity(tie: str) -> None:
+    cands = [_candidate(i, None) for i in range(5)]
+    for i, c in enumerate(cands):
+        c.shot.kind = "broll" if i in (1, 3) else "talking"
+    if tie == "score":
+        cands[3].score = 2
+    elif tie == "id":
+        cands[3].shot.start_s = cands[1].shot.start_s
+        cands[3].shot.shot_id = "a_000_first"
+    picked = cands[::2]
+    before = [c.model_dump() for c in cands]
+    result = apply_kind_alternation(picked, list(reversed(cands)), 1)
+    assert result == [cands[0], cands[1 if tie == "start" else 3], cands[4]]
+    assert [c.model_dump() for c in cands] == before
+    assert picked == cands[::2]
+    # A move from 0 to 0.5 does not strictly improve the gap to 0.25.
+    assert apply_kind_alternation(picked, cands, 0.25) == picked
+
+
+def test_alternation_checks_both_duplicate_neighbours_and_chronology() -> None:
+    cands = [_candidate(i, None) for i in range(9)]
+    for c in cands:
+        c.shot.kind = "talking"
+    cands[4].shot.kind = "broll"
+    cands[1].shot.dup_group = cands[2].shot.dup_group = "x"
+    cands[6].shot.dup_group = cands[7].shot.dup_group = ""
+    cands[3].score = 0.5
+    cands[5].shot.dup_group = "x"
+    picked = [cands[i] for i in (1, 4, 7)]
+    assert apply_kind_alternation(picked, cands, 0) == [cands[i] for i in (1, 3, 7)]
+
+
+def test_alternation_prefers_score_over_largest_improvement() -> None:
+    cands = [_candidate(i, None) for i in range(10)]
+    for c in cands:
+        c.shot.kind = "talking"
+    cands[0].shot.kind = cands[5].shot.kind = "broll"
+    cands[0].score = 2
+    picked = [cands[i] for i in (1, 3, 6, 9)]
+    # First take the higher-score endpoint (0 -> 1/3), then the interior (1/3 -> 1).
+    # Taking the larger interior improvement first would block the endpoint swap.
+    pool = [*picked, cands[0], cands[5]]
+    assert apply_kind_alternation(picked, pool, 1) == [cands[i] for i in (0, 3, 5, 9)]
+
+
+@pytest.mark.parametrize("strategy", ["coverage", "highlights"])
+@pytest.mark.parametrize("cold_open", [False, True])
+def test_alternation_composes_with_later_planner_steps(strategy: str, cold_open: bool) -> None:
+    shots, assets = _day()
+    # Validation expects its supplied shot table in chronological asset order.
+    shots.sort(key=lambda shot: ("bacz".index(shot.asset_id), shot.start_s))
+    for i, shot in enumerate(shots):
+        shot.kind = "talking" if i % 2 else "broll"
+        shot.cut_points = [CutPoint(time_s=shot.start_s + 1, kind="pause")]
+    params = RoughCutParams(target_s=60, strategy=strategy)
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=0.75, median=4, p90=6),
+        cuts_per_min=15,
+        structure=StructureStats(montage_share=0.4, intro_pace_ratio=0.5, kind_alternation=1),
+        cold_open_clips=1,
+    )
+    chronological = rough_cut(shots, assets, params, profile)
+    edl = rough_cut(shots, assets, params, profile, cold_open=cold_open)
+    assert {c.shot_id for c in edl.clips} == {c.shot_id for c in chronological.clips}
+    assert validate_edl(edl, shots, profile, target_s=60) == []
+
+
+@pytest.mark.parametrize("kinds", [["talking", None, "broll"], [None], []])
+def test_alternation_without_known_pairs_does_nothing(
+    monkeypatch: pytest.MonkeyPatch, kinds: list[str | None]
+) -> None:
+    # Eligible legacy shots normally get a fallback kind; isolate unknown classifier results.
+    monkeypatch.setattr("vlogcut.plan.rules.classify_kind", lambda shot: shot.kind)
+    picked = [_candidate(i, None) for i in range(len(kinds))]
+    for c, kind in zip(picked, kinds, strict=True):
+        c.shot.kind = kind
+    alternative = _candidate(10, None)
+    alternative.shot.kind = "talking"
+    assert kind_alternation(kinds) is None
+    assert apply_kind_alternation(picked, [*picked, alternative], 1) == picked
+
+
+def test_alternation_unknown_candidates_are_skipped_and_unknown_picks_break_pairs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("vlogcut.plan.rules.classify_kind", lambda shot: shot.kind)
+    cands = [_candidate(i, None) for i in range(5)]
+    for c, kind in zip(cands, ["talking", None, "talking", None, "broll"], strict=True):
+        c.shot.kind = kind
+    picked = [cands[i] for i in (0, 2, 3, 4)]
+    # The only known pair is talking/talking; do not bridge the unknown pick.
+    assert apply_kind_alternation(picked, cands, 0) == picked
+    assert apply_kind_alternation(picked, cands, 1) == picked
+
+
+def test_alternation_preserves_capacity_for_duration_fit() -> None:
+    shots = [_shot("a", i) for i in range(4)]
+    for shot in shots:
+        shot.kind = "talking"
+    shots[1].kind = "broll"
+    shots[1].quality.usable_range = (0, 1.5)
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1.5, median=5, p90=5),
+        cuts_per_min=12,
+        structure=StructureStats(montage_share=0, kind_alternation=1),
+    )
+    edl = rough_cut(
+        shots, [_asset("a", 0)], RoughCutParams(target_s=13, strategy="highlights"), profile
+    )
+    assert shots[1].shot_id not in {c.shot_id for c in edl.clips}
+    assert validate_edl(edl, shots, profile, target_s=13) == []
 
 
 @pytest.mark.parametrize(

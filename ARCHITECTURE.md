@@ -113,8 +113,9 @@ flags are skipped: references are finished edits), then aggregate:
   Talking ↔ b-roll alternation is measured for EDL-derived profiles supplied with
   analyzed shots; references skip quality analysis and leave it unmeasured.
   Measured alternation contributes to style distance and appears in style show/diff;
-  the LLM prompt describes a measured value, including zero, as guidance, while
-  the rules planner and validation still ignore it.
+  the LLM prompt describes a measured value, including zero, as guidance. The
+  rules planner swaps eligible shots to approach it without reordering clips;
+  validation still ignores this dimension.
   Intro length, speech ratio and cold-open measurement remain planned. Pacing alone
   reads as a speed slider; structure is what makes a cut recognisably someone's.
   Cold-open allowance is user-set. The rules planner uses the intro pacing ratio
@@ -188,6 +189,11 @@ for it, it is not explainable, and it would break principle 2.
   planner: `cut --ranker MODEL_JSON` scores shots in the pipeline and forwards
   the mapping to both default rules planning and the fallback after LLM failure.
   Omitting the ranker preserves EDL and prompt bytes.
+- After clip-count selection, measured `structure.kind_alternation` enables a
+  bounded greedy swap pass before length assignment, montage shaping, snapping
+  and cold-open selection. It reuses eligible candidates and blended scores,
+  preserving chronology, count, duplicate-group adjacency and duration capacity.
+  Missing profile, structure or alternation preserves the existing EDL bytes.
 - Output: `EDL`; the rules planner aligns an in- or out-point to a cut-point candidate
   when a fixed-length window fits within the usable part and the maximum shift
 - `plan/llm.py` provides deterministic prompt building and EDL parsing via
@@ -388,8 +394,11 @@ both sides measure it, otherwise listing it in the unmeasured summary. The LLM
 planner's initial prompt describes a measured value, including zero, with two
 decimal places as guidance on adjacent talking/b-roll pairs switching kind.
 Unmeasured alternation adds no line and preserves prompt bytes; repair rounds
-reuse the conversation without repeating the line. The rules planner and
-validation still ignore this dimension.
+reuse the conversation without repeating the line. The rules planner uses measured
+alternation, including zero, for deterministic single-shot swaps after selection
+and before length assignment. Each swap strictly reduces the absolute target gap;
+unknown kinds break adjacency and zero eligible pairs leave selection unchanged.
+Validation remains unchanged and still ignores this dimension.
 
 `StyleProfile.cold_open_clips` is a non-negative, user-set integer defaulting to 0
 (no cold open), including when absent from old profile JSON. It exempts the first
@@ -628,6 +637,26 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 
 ## Decisions log
 
+- 2026-10-19: rules planner kind alternation — a pure post-selection pass runs
+  only for measured `structure.kind_alternation`, including 0.0. Reuse
+  `analyze/kind.classify_kind` and the style measurement helper: skip adjacent
+  pairs touching `None`, never bridge them; no eligible pairs means no swaps.
+  Consider single replacements from the unpicked, hard-filtered candidate pool,
+  strictly between the pick's chronological neighbours, with a known kind
+  different from the replaced kind. Neither new neighbour may share the
+  replacement's non-None `dup_group`. Preserve clip count and capped duration
+  capacity for the existing ±10% fit (or do not worsen an existing shortfall).
+  Among swaps strictly reducing the absolute target gap, choose the highest
+  blended candidate score, including ranker percentiles; ties use earliest source
+  start, then shot ID. For the same candidate, prefer the smallest gap, then the
+  earliest picked position. Recompute after each swap; stop without improvement
+  or after at most the picked count. Clip-count fitting uses duration bounds;
+  final length assignment, intro pacing, montage bursts, snapping and optional
+  cold open all consume the swapped set. Cold open can change measured adjacency.
+  Missing profile, structure or alternation bypasses the pass and preserves EDL
+  JSON bytes. Validation remains unchanged and ignores alternation; no schema,
+  LLM prompt, repair, reference measurement or style-distance changes.
+
 - 2026-10-19: LLM planner alternation guidance — describe measured
   `structure.kind_alternation`, including zero, with two decimal places alongside
   the existing structure guidance in the initial prompt. Unmeasured values preserve
@@ -673,8 +702,8 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   so an alternation-only structure cannot arise on this path. Supporting such a
   structure would require a separate change to the existing montage contract.
   Distance and style show/diff now consume alternation as described above;
-  the LLM prompt now describes measured values as guidance, while the rules planner
-  and validation still ignore it.
+  the LLM prompt now describes measured values as guidance. Rules planner swaps
+  are described above; validation still ignores this dimension.
 
 - 2026-10-19: Shot.kind reuses the rules planner's `kept_for_audio` heuristic;
   no new speech detector or dependency. Explicit kinds take precedence. Rejected
