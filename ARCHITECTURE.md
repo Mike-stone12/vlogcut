@@ -306,6 +306,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · plan: shot table as planner input text (plan/shot_table.py)
 - [x] Week 4 · plan: rules planner avoids back-to-back dup_group clips (plan/rules.py)
 - [x] Week 4 · validate: deterministic repair wired into pipeline.cut after checks (pipeline.py, cli.py)
 - [x] Week 4 · validate: deterministic repair helper for unknown/rejected clips and transitions (validate/repair.py)
@@ -754,6 +755,19 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   the existing length-fitting loop; sampling, fitting, placement, transitions and
   clip audio then use the final picks as before. With no shared non-None groups,
   EDL JSON is unchanged. Group computation and deterministic repair are unchanged.
+
+- 2026-11-03: planner shot table — `plan/shot_table.format_shot_table` is a pure,
+  deterministic text formatter with no pipeline wiring or model calls. Columns
+  include full shot and asset IDs, source start, duration, usable range, quality
+  warnings, dup_group, kept_for_audio (derived from warnings), cut-point candidates
+  with kind, rejection status and reasons. Usable ranges already use shot-relative
+  offsets; absolute cut-point times subtract Shot.start_s to match Clip.in_s/out_s.
+  All times use two fixed decimal places. A missing usable range expands to the
+  whole shot; other empty values use `-`. Tab-separated rows JSON-escape text and
+  retain input shot/list order. Rejected shots are omitted by default, with a final
+  omitted-count summary; include_rejected=True includes them with their reasons.
+  Kind / caption / ranker score columns will be added when those fields exist as
+  populated planner inputs (the schema already has an optional caption placeholder).
 
 ## Open questions
 
