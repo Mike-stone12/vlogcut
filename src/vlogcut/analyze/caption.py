@@ -128,11 +128,26 @@ def caption_shots(
     ``model`` identifies the model for caching; configure the router's captioner
     role to select the actual model. Context is shared by all shots. Inputs are
     not mutated. Progress reports each returned shot, including cache hits.
+    The first eligible member of each non-None duplicate group supplies the
+    result for its peers, with independent tags lists. Missing keyframes skip
+    the entire group; captioning errors propagate without trying another member.
     """
     results: dict[str, CaptionResult] = {}
+    groups: dict[str, CaptionResult | None] = {}
+    saved_calls = 0
     for shot in shots:
         if shot.quality.rejected and not include_rejected:
             continue
+        if shot.dup_group is not None:
+            if shot.dup_group in groups:
+                representative = groups[shot.dup_group]
+                if representative is not None:
+                    results[shot.shot_id] = representative.model_copy(deep=True)
+                    if progress is not None:
+                        progress(f"Captioned {shot.shot_id}")
+                saved_calls += 1
+                continue
+            groups[shot.dup_group] = None
         if not shot.keyframes:
             log.warning("Skipping shot %s: no keyframes", shot.shot_id)
             continue
@@ -162,6 +177,9 @@ def caption_shots(
             finally:
                 tmp.unlink(missing_ok=True)
         results[shot.shot_id] = result
+        if shot.dup_group is not None:
+            groups[shot.dup_group] = result
         if progress is not None:
             progress(f"Captioned {shot.shot_id}")
+    log.debug("Dedup saved %d captioner calls before cache lookup", saved_calls)
     return results

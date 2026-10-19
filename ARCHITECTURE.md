@@ -85,7 +85,10 @@ ingest → analyze → plan → validate/repair → render/export → feedback
   with rejected-shot filtering and caching (model name in the cache key).
   Pipeline/CLI wiring exists as opt-in `--caption`, populating `Shot.caption`,
   `tags` and `interest`, now exposed to the LLM planner in the shot table.
-  Dedup filtering remains planned
+  Within each non-None `dup_group`, only the first eligible shot in input order
+  uses the captioner/cache path; other eligible members receive its description,
+  tags and interest with independent tags lists. Rejected shots are excluded by
+  default; ungrouped shots retain per-shot captioning.
 - Cut-point candidates: energy-based audio pauses populate `Shot.cut_points` during
   analysis. The rules planner shifts fixed-length clips onto nearby candidates after
   length fitting and rounding. Beats of the chosen music, motion minima and LLM
@@ -619,6 +622,15 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: batch caption deduplication — the first member of each non-None
+  `dup_group` that passes the existing rejection filter is the representative.
+  Only its existing model-aware cache and captioner path are used; peers receive
+  independent copies of its result in input order. If it has no keyframes, the
+  group remains uncaptioned; if captioning fails, the existing error propagates.
+  Never retry with another member. Ungrouped shots and the explicit
+  `include_rejected` override retain their existing behavior. Inputs, schemas,
+  router, cache keys and pipeline/CLI interfaces are unchanged.
 
 - 2026-10-19: **schema change**: add `RunInputs` and `Run` manifests, with a pure
   16-character SHA-256 input fingerprint. Hash loaded profile/ranker model JSON

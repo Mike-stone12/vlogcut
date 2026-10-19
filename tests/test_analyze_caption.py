@@ -321,3 +321,121 @@ def test_batch_atomic_write_cleanup(
     with pytest.raises(OSError, match="replace failed"):
         caption_shots(shots, router, tmp_path, model="m-cap")
     assert not list((tmp_path / "captions").glob("*"))
+
+
+@pytest.fixture
+def grouped_shots(shots: list[Shot]) -> list[Shot]:
+    representative, ungrouped = shots
+    representative.dup_group = "take"
+    peers = [
+        representative.model_copy(deep=True, update={"shot_id": shot_id})
+        for shot_id in ("s3", "s4")
+    ]
+    # Interleave an ungrouped shot to check global input order is preserved.
+    return [representative, ungrouped, *peers]
+
+
+def test_batch_dedup_copies_results(
+    tmp_path: Path,
+    grouped_shots: list[Shot],
+    batch_router: tuple[ModelRouter, FakeClient],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    router, client = batch_router
+    before = [shot.model_dump() for shot in grouped_shots]
+    progress: list[str] = []
+    with caplog.at_level("DEBUG", logger="vlogcut.analyze.caption"):
+        results = caption_shots(
+            grouped_shots, router, tmp_path, model="m-cap", progress=progress.append
+        )
+    assert len(client.requests) == 2
+    assert list(results) == [shot.shot_id for shot in grouped_shots]
+    assert progress == [f"Captioned {shot.shot_id}" for shot in grouped_shots]
+    assert "Dedup saved 2 captioner calls" in caplog.text
+    assert [shot.model_dump() for shot in grouped_shots] == before
+    assert all(result == parse_caption(client.output) for result in results.values())
+    assert len({id(result.tags) for result in results.values()}) == 4
+    results["s3"].tags.append("changed")
+    assert results["s2"].tags == results["s4"].tags == ["cafe"]
+
+
+def test_batch_dedup_rejected_first(
+    tmp_path: Path,
+    grouped_shots: list[Shot],
+    batch_router: tuple[ModelRouter, FakeClient],
+) -> None:
+    router, client = batch_router
+    rejected, _, representative, peer = grouped_shots
+    rejected.quality.rejected = True
+    # Distinct frames prove that the first eligible member is sent to the router.
+    representative.keyframes = representative.keyframes[1:2]
+    peer.keyframes = peer.keyframes[2:]
+    results = caption_shots([rejected, representative, peer], router, tmp_path, model="m-cap")
+    assert list(results) == [representative.shot_id, peer.shot_id]
+    assert len(client.requests) == 1
+    assert client.requests[0]["messages"] == build_caption_messages(
+        [Path(path) for path in representative.keyframes]
+    )
+    assert results[representative.shot_id] == results[peer.shot_id]
+    assert rejected.caption is None and rejected.tags == [] and rejected.interest is None
+    # Rejection also prevents copying after a successful representative.
+    assert (
+        caption_shots([representative, rejected, peer], router, tmp_path, model="m-cap") == results
+    )
+    assert len(client.requests) == 1
+
+
+def test_batch_ungrouped_still_captioned_individually(
+    tmp_path: Path, shots: list[Shot], batch_router: tuple[ModelRouter, FakeClient]
+) -> None:
+    router, client = batch_router
+    results = caption_shots(shots, router, tmp_path, model="m-cap")
+    assert all(shot.dup_group is None for shot in shots)
+    assert len(client.requests) == len(shots)
+    assert list(results) == [shot.shot_id for shot in shots]
+    assert all(result == parse_caption(client.output) for result in results.values())
+
+
+def test_batch_dedup_warm_cache(
+    tmp_path: Path,
+    grouped_shots: list[Shot],
+    batch_router: tuple[ModelRouter, FakeClient],
+) -> None:
+    router, client = batch_router
+    first = caption_shots(grouped_shots, router, tmp_path, model="m-cap")
+    assert len(client.requests) == 2
+    assert {path.stem for path in (tmp_path / "captions").glob("*.json")} == {"s2", "s1"}
+    client.output = RuntimeError("warm cache must not call the provider")
+    second = caption_shots(grouped_shots, router, tmp_path, model="m-cap")
+    assert second == first
+    assert len(client.requests) == 2
+    assert len({id(result.tags) for result in second.values()}) == 4
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("provider failed"), "invalid JSON", ""])
+def test_batch_dedup_failure_does_not_retry_peer(
+    tmp_path: Path,
+    grouped_shots: list[Shot],
+    batch_router: tuple[ModelRouter, FakeClient],
+    failure: Exception | str,
+) -> None:
+    router, client = batch_router
+    client.output = failure
+    before = [shot.model_dump() for shot in grouped_shots]
+    with pytest.raises(RuntimeError):
+        caption_shots(grouped_shots, router, tmp_path, model="m-cap")
+    assert len(client.requests) == 1
+    assert [shot.model_dump() for shot in grouped_shots] == before
+    assert not list((tmp_path / "captions").glob("*"))
+
+
+def test_batch_dedup_missing_representative_frames_does_not_retry_peer(
+    tmp_path: Path, shots: list[Shot], batch_router: tuple[ModelRouter, FakeClient]
+) -> None:
+    router, client = batch_router
+    for shot in shots:
+        shot.dup_group = ""  # Empty strings are groups too; only None is ungrouped.
+    shots[0].keyframes = []
+    assert caption_shots(shots, router, tmp_path, model="m-cap") == {}
+    assert client.requests == []
+    assert not (tmp_path / "captions").exists()
