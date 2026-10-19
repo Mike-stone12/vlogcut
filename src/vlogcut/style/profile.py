@@ -17,6 +17,7 @@ import logging
 import statistics
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
@@ -120,6 +121,16 @@ def montage_share(
         if run >= min_run:
             in_bursts += run
     return in_bursts / total if total else None
+
+
+def kind_alternation(kinds: Sequence[Literal["talking", "broll"] | None]) -> float | None:
+    """Share of known adjacent pairs that differ; unknown kinds break adjacency."""
+    eligible, differing = 0, 0
+    for left, right in zip(kinds, kinds[1:], strict=False):
+        if left is not None and right is not None:
+            eligible += 1
+            differing += left != right
+    return differing / eligible if eligible else None
 
 
 def intro_pace_ratio(

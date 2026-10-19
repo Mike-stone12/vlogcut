@@ -9,7 +9,15 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 # ---------------------------------------------------------------------------
 # Ingest / analyze
@@ -150,6 +158,15 @@ class StructureStats(BaseModel):
 
     montage_share: float = Field(ge=0, le=1)
     intro_pace_ratio: float | None = Field(default=None, gt=0)  # None = not measured
+    kind_alternation: float | None = Field(default=None, ge=0, le=1)
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        # Preserve existing profile JSON bytes when shot kinds were not measured.
+        data = handler(self)
+        if self.kind_alternation is None:
+            data.pop("kind_alternation", None)
+        return data
 
 
 class LookStats(BaseModel):

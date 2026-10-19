@@ -8,6 +8,8 @@ from vlogcut.schemas import (
     Clip,
     DurationStats,
     LookStats,
+    QualityFlags,
+    Shot,
     StyleProfile,
     Transition,
     TransitionMix,
@@ -152,6 +154,83 @@ def test_profile_from_edl_measures_dissolves_over_boundaries():
     profile = profile_from_edl(edl)
     assert profile.transitions == TransitionMix(hard_cut=0.5, dissolve=0.5)
     assert profile.cuts_per_min == 30
+
+
+def test_profile_from_edl_without_shots_preserves_previous_json_bytes() -> None:
+    edl = _edl([1, 2, 1])
+    edl.clips[1].transition_in = Transition(kind="dissolve", duration_s=0.5)
+    # Captured before adding kind_alternation, including all existing null fields.
+    previous = (
+        '{"version":1,"source_refs":["custom"],'
+        '"shot_duration_s":{"p10":1.0,"median":1.0,"p90":1.8},"cuts_per_min":30.0,'
+        '"beat_aligned_ratio":null,"bpm_range":null,"intro_s":null,"cold_open_clips":0,'
+        '"speech_ratio":null,"transitions":{"hard_cut":0.5,"dissolve":0.5},'
+        '"structure":{"montage_share":0.0,"intro_pace_ratio":null},"look":null,'
+        '"subtitle":{"present":false,"position":null,"relative_size":null},'
+        '"notes":"1 reference, 0.1 min, 2 cuts; median shot 1.0 s '
+        '(p10 1.0, p90 1.8); 30.0 cuts/min"}'
+    )
+    assert profile_from_edl(edl, "custom").model_dump_json() == previous
+    for supplied in (None, []):
+        profile = profile_from_edl(edl, "custom", shots=supplied)
+        assert profile.structure.kind_alternation is None
+        assert profile.model_dump_json() == previous
+
+
+@pytest.fixture
+def kind_shots() -> list[Shot]:
+    quality = QualityFlags(sharpness=50, exposure_clip=0, shake=0)
+    return [
+        Shot(shot_id="s0", asset_id="a", start_s=0, end_s=4, quality=quality, kind="talking"),
+        Shot(shot_id="s1", asset_id="a", start_s=4, end_s=8, quality=quality, kind="broll"),
+        Shot(
+            shot_id="s2", asset_id="a", start_s=8, end_s=12,
+            quality=quality.model_copy(update={"warnings": ["kept_for_audio"]}),
+        ),
+        Shot(shot_id="s3", asset_id="a", start_s=12, end_s=16, quality=quality),
+    ]  # fmt: skip
+
+
+def test_profile_from_edl_kind_alternation_uses_classifier_and_clip_order(
+    kind_shots: list[Shot],
+) -> None:
+    edl = _edl([2] * 4)
+    original_shots = [shot.model_dump_json() for shot in kind_shots]
+    original_edl = edl.model_dump_json()
+    baseline = profile_from_edl(edl)
+    measured = profile_from_edl(edl, shots=list(reversed(kind_shots)))
+    assert measured.structure.kind_alternation == 1.0
+    assert measured.structure.montage_share == baseline.structure.montage_share
+    assert measured.structure.intro_pace_ratio == baseline.structure.intro_pace_ratio
+    assert [shot.model_dump_json() for shot in kind_shots] == original_shots
+    assert edl.model_dump_json() == original_edl
+    # Measuring the dimension does not expose it in distance or style tables.
+    assert profile_distance(baseline, measured) == profile_distance(baseline, baseline)
+    assert format_profile("p", measured) == format_profile("p", baseline)
+    assert format_diff("a", baseline, "b", measured, profile_distance(baseline, measured)) == (
+        format_diff("a", baseline, "b", baseline, profile_distance(baseline, baseline))
+    )
+    edl.clips = [edl.clips[i] for i in (0, 2, 1, 3)]
+    assert profile_from_edl(edl, shots=kind_shots).structure.kind_alternation == 1 / 3
+
+
+@pytest.mark.parametrize("unknown", ["missing", "rejected"])
+def test_profile_from_edl_unknown_kind_breaks_adjacency(
+    kind_shots: list[Shot],
+    unknown: str,
+) -> None:
+    edl = _edl([2] * 3)
+    edl.clips[1].shot_id = unknown
+    edl.clips[2].shot_id = "s1"
+    kind_shots.append(
+        Shot(
+            shot_id="rejected", asset_id="a", start_s=16, end_s=20,
+            quality=QualityFlags(sharpness=0, exposure_clip=0, shake=0, rejected=True),
+        )
+    )  # fmt: skip
+    assert profile_from_edl(edl, shots=kind_shots).structure.kind_alternation is None
+    edl.clips.append(Clip(shot_id="s1", in_s=0, out_s=2))
+    assert profile_from_edl(edl, shots=kind_shots).structure.kind_alternation == 0.0
 
 
 def test_profile_from_edl_measures_bursts_in_speed_adjusted_timeline_order() -> None:

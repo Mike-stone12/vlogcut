@@ -231,6 +231,36 @@ def test_transition_mix_accepts_shares_within_tolerance(hard, dissolve):
     assert TransitionMix(hard_cut=hard, dissolve=dissolve).dissolve == dissolve
 
 
+def test_old_structure_json_defaults_to_unmeasured_kind_alternation() -> None:
+    profile = StyleProfile.model_validate_json(
+        '{"shot_duration_s":{"p10":1,"median":2,"p90":4},"cuts_per_min":20,'
+        '"structure":{"montage_share":0.25,"intro_pace_ratio":0.5}}'
+    )
+    assert profile.structure.kind_alternation is None
+    assert profile.structure.montage_share == 0.25
+    assert profile.structure.intro_pace_ratio == 0.5
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1])
+def test_kind_alternation_rejects_out_of_range(value: float) -> None:
+    with pytest.raises(ValidationError, match="kind_alternation"):
+        StructureStats(montage_share=0, kind_alternation=value)
+
+
+@pytest.mark.parametrize("value", [None, 0.0, 1 / 3, 1.0])
+def test_kind_alternation_round_trips(value: float | None) -> None:
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1, median=2, p90=4),
+        cuts_per_min=20,
+        structure=StructureStats(montage_share=0, kind_alternation=value),
+    )
+    payload = profile.model_dump_json()
+    restored = StyleProfile.model_validate_json(payload)
+    assert restored == profile
+    assert restored.structure.kind_alternation == value
+    assert ('"kind_alternation":' in payload) == (value is not None)
+
+
 def test_old_profile_json_has_unmeasured_transitions():
     profile = StyleProfile.model_validate_json(
         '{"shot_duration_s": {"p10": 1, "median": 2, "p90": 4}, "cuts_per_min": 20}'
