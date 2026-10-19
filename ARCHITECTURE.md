@@ -107,7 +107,9 @@ flags are skipped: references are finished edits), then aggregate:
 - Transitions: share of hard cuts / dissolves (from `analyze/transitions.py`); fades
   through black currently count as two dissolves
 - Audio: speech-over-music ratio, whether clip audio is kept under music
-- Look: brightness / saturation / warmth stats (for later matching)
+- Look: brightness / saturation / warmth stats (for later matching). A pure helper
+  `analyze/look.py` measures pooled stats from sampled RGB frames; it is not yet
+  wired into `StyleProfile`, distance or planners.
 - Text: subtitle presence/position/size (OCR; v1.5)
 - `notes`: short natural-language summary written by a VLM
 - Output: `StyleProfile` JSON — versioned and user-editable (`vlogcut style build`);
@@ -1023,6 +1025,18 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   divide cuts per minute, and set hard-cut/dissolve shares to 1-s/s when supplied.
   Preserve all other fields and append a deterministic note without mutating inputs.
   No schema change, pipeline/CLI wiring, re-planning, persistence or ranker work.
+
+- 2026-10-18: look measurements — `analyze/look.py` uses lazy NumPy imports and
+  measures all sampled pixels equally: brightness is mean Rec.709 luma
+  (0.2126 R + 0.7152 G + 0.0722 B), saturation is mean HSV (max-min)/max
+  (zero for black), and warmth is mean R-B. uint8 RGB is divided by 255;
+  floating-point RGB is clipped to [0, 1]. The shared ffmpeg helper decodes
+  rgb24 frames at 1 fps and 64x64 by default. Across references, `pool_look`
+  weights each result by its frame count and skips `None`. Zero frames or no
+  measured results return `None`, meaning "not measured", distinct from black.
+  `LookStats` is a local analysis result outside `schemas.py`; no schema change.
+  No wiring into `StyleProfile`, distance, planners, pipeline or CLI, and no
+  caching, colour matching or grading.
 
 ## Open questions
 

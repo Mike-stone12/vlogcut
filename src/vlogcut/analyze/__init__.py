@@ -1,5 +1,6 @@
 """Analyze: shot detection, quality flags, captions and speech per shot."""
 
+from vlogcut.analyze.look import LookParams, LookStats, load_rgb_frames, look_stats, pool_look
 from vlogcut.analyze.pauses import (
     Pause,
     PauseParams,
@@ -13,6 +14,8 @@ from vlogcut.analyze.quality import QualityParams, assess_shots
 from vlogcut.analyze.shots import ShotDetectionError, ShotParams, ShotSpan, detect_shots
 
 __all__ = [
+    "LookParams",
+    "LookStats",
     "Pause",
     "PauseParams",
     "QualityParams",
@@ -25,5 +28,8 @@ __all__ = [
     "detect_shots",
     "find_pauses",
     "load_mono_audio",
+    "load_rgb_frames",
+    "look_stats",
+    "pool_look",
     "rms_envelope",
 ]
