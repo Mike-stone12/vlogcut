@@ -2,6 +2,7 @@
 `vlogcut style build <reference videos>` -> style profile JSON, `style show / diff`.
 `vlogcut feedback page / pairs / classify` -> variants, preferences and profile updates.
 `vlogcut ranker train` -> trained ranker JSON for `cut --ranker`.
+`vlogcut run show MANIFEST_JSON` -> saved run inputs and output paths.
 
 Thin wrapper over pipeline, style and feedback helpers; argument parsing and output only.
 """
@@ -119,6 +120,13 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("-o", "--out", type=Path, default=Path("ranker.json"), help="ranker JSON")
     train.add_argument("--context", default="", help="project or brief description")
     train.add_argument("-v", "--verbose", action="store_true")
+    run = sub.add_parser("run", help="inspect saved run manifests")
+    runs = run.add_subparsers(dest="run_command", required=True)
+    show = runs.add_parser("show", help="print a run manifest's inputs and output paths")
+    show.add_argument(
+        "manifest", type=Path, metavar="MANIFEST_JSON",
+        help="manifest JSON file at <workspace>/runs/<run_id>.json (not a directory)",
+    )  # fmt: skip
     return parser
 
 
@@ -135,6 +143,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cut(args)
     if args.command == "ranker":
         return _ranker_train(args)
+    if args.command == "run":
+        return _run_show(args)
     if args.command == "feedback":
         feedback_commands = {
             "page": _feedback_page, "pairs": _feedback_pairs, "classify": _feedback_classify,
@@ -252,6 +262,17 @@ def _cut(args: argparse.Namespace) -> int:
         print(f"preview   {result.preview_path}")
     print(f"manifest  {result.manifest}")
     print(f"done in {time.perf_counter() - started:.1f} s")
+    return 0
+
+
+def _run_show(args: argparse.Namespace) -> int:
+    from vlogcut.run import format_run, load_run
+
+    try:
+        run = load_run(args.manifest)
+    except ValueError as exc:
+        return _fail(str(exc))
+    print(format_run(run))
     return 0
 
 

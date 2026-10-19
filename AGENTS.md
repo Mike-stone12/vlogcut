@@ -19,6 +19,7 @@ vlogcut cut <footage folder> --music song.mp3
 vlogcut feedback page <previews...>   # local HTML; feedback pairs <feedback.json> for pairs
 vlogcut feedback classify feedback.json --profile fast.json -o updated.json
 vlogcut ranker train feedback.json -w workspace/day -o ranker.json   # use with cut --ranker
+vlogcut run show <manifest.json>   # inspect workspace/<project>/runs/<run_id>.json
 pytest -q                 # tests (offline, no GPU, no API keys)
 ruff check . && ruff format --check .
 ```
