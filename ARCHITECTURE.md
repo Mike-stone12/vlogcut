@@ -581,6 +581,14 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   written `shots.json` use current pause results without repeating quality analysis.
   Planner use remains pending; the week-3 cut-point milestone is still incomplete.
 
+- 2026-10-24: cut-point placement helper — `plan/rules.place_on_cut_points` moves a
+  fixed-length clip within an absolute usable window (1e-9 s feasibility tolerance),
+  aligning its in- or out-point to a `Shot.cut_points` candidate. The smallest shift
+  from the default wins, subject to an optional maximum shift; ties prefer both ends
+  on candidates, then the earlier in-point. If no placement qualifies, the default is
+  returned unchanged. Clip length is never changed. This helper is not wired into `rough_cut`
+  yet; existing planner output is unchanged.
+
 ## Open questions
 
 - How many variants per run

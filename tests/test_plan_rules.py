@@ -11,6 +11,7 @@ from vlogcut.plan.rules import (
     assign_transitions,
     expected_length,
     fit_lengths,
+    place_on_cut_points,
     sample_lengths,
 )
 from vlogcut.schemas import (
@@ -55,6 +56,94 @@ def _by_id(shots: list[Shot]) -> dict[str, Shot]:
 
 
 # ---------------------------------------------------------------------------
+
+
+def test_place_on_cut_points_no_candidates_returns_default() -> None:
+    assert place_on_cut_points(100, 110, 3, 103.125, []) == 103.125
+
+
+@pytest.mark.parametrize("candidate,expected", [(107.25, 104.25), (104.25, 104.25)])
+def test_place_on_cut_points_snaps_end_or_start(candidate: float, expected: float) -> None:
+    start = place_on_cut_points(100, 110, 3, 104, [candidate])
+    assert start == expected
+    assert candidate in (start, start + 3)
+
+
+@pytest.mark.parametrize("candidates", [[99, 111], [102, 108], [99, 102, 108, 111]])
+def test_place_on_cut_points_ignores_infeasible_placements(candidates: list[float]) -> None:
+    # Interior candidates also fail: neither a start nor an end can fit 9 s.
+    assert place_on_cut_points(100, 110, 9, 100.5, candidates) == 100.5
+
+
+@pytest.mark.parametrize("limit,expected", [(None, 105), (0, 103), (1.5, 103), (2, 105)])
+def test_place_on_cut_points_max_shift(limit: float | None, expected: float) -> None:
+    assert place_on_cut_points(100, 110, 3, 103, [108], max_shift_s=limit) == expected
+
+
+def test_place_on_cut_points_zero_shift_allows_default_candidate() -> None:
+    assert place_on_cut_points(100, 110, 3, 103, [106], max_shift_s=0) == 103
+
+
+@pytest.mark.parametrize("candidates", [[106, 108, 104], [104, 108, 106]])
+def test_place_on_cut_points_tie_prefers_both_ends(candidates: list[float]) -> None:
+    # Starts 102 and 104 tie in distance, but only [104, 108] aligns both ends.
+    assert place_on_cut_points(100, 110, 4, 103, candidates) == 104
+
+
+@pytest.mark.parametrize("candidates", [[104, 102], [102, 104]])
+def test_place_on_cut_points_tie_prefers_earlier_start(candidates: list[float]) -> None:
+    assert place_on_cut_points(100, 110, 4, 103, candidates) == 102
+
+
+def test_place_on_cut_points_smallest_shift_beats_both_ends() -> None:
+    assert place_on_cut_points(100, 110, 4, 103, [103.25, 104, 108]) == 103.25
+
+
+def test_place_on_cut_points_preserves_length_and_input() -> None:
+    candidates = [108, 102, 107.5, 102]
+    original = candidates.copy()
+    length = 3.5
+    start = place_on_cut_points(100, 110, length, 103.5, candidates)
+    end = start + length
+    assert (start, end) == (104, 107.5)
+    assert end - start == length
+    assert 100 <= start < end <= 110
+    assert candidates == original
+    assert place_on_cut_points(100, 110, length, 103.5, tuple(candidates)) == start
+
+
+@pytest.mark.parametrize("candidate", [100, 110])
+def test_place_on_cut_points_accepts_window_boundaries(candidate: float) -> None:
+    assert place_on_cut_points(100, 110, 10, 100, [candidate]) == 100
+
+
+@pytest.mark.parametrize("candidate,expected", [(-5e-10, -5e-10), (10 + 5e-10, 7 + 5e-10)])
+def test_place_on_cut_points_window_tolerance(candidate: float, expected: float) -> None:
+    start = place_on_cut_points(0, 10, 3, 4, [candidate])
+    assert start == expected
+    assert -1e-9 <= start and start + 3 <= 10 + 1e-9
+
+
+def test_place_on_cut_points_short_window_within_tolerance() -> None:
+    assert place_on_cut_points(0, 3 - 5e-10, 3, 0, [0]) == 0
+
+
+@pytest.mark.parametrize(
+    "lo,hi,length,limit,message",
+    [
+        (0, 10, 0, None, "length_s must be positive"),
+        (0, 10, -1, None, "length_s must be positive"),
+        (0, 2, 3, None, "window is shorter"),
+        (0, 3 - 2e-9, 3, None, "window is shorter"),
+        (10, 0, 3, None, "window is shorter"),
+        (0, 10, 3, -0.1, "max_shift_s must be non-negative"),
+    ],
+)
+def test_place_on_cut_points_invalid_arguments(
+    lo: float, hi: float, length: float, limit: float | None, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        place_on_cut_points(lo, hi, length, 0, [], max_shift_s=limit)
 
 
 def test_sample_lengths_small_counts_and_expected_length():
