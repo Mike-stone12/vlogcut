@@ -9,6 +9,7 @@ from vlogcut.plan.rules import (
     DEFAULT_PACING,
     _Candidate,
     _lengths,
+    apply_cold_open,
     apply_intro_pace,
     assign_lengths,
     assign_transitions,
@@ -19,6 +20,7 @@ from vlogcut.plan.rules import (
     sample_lengths,
 )
 from vlogcut.schemas import (
+    Clip,
     CutPoint,
     DurationStats,
     MediaAsset,
@@ -64,6 +66,146 @@ def _by_id(shots: list[Shot]) -> dict[str, Shot]:
 
 
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("strategy", ["coverage", "highlights"])
+@pytest.mark.parametrize("enabled,allowance", [(False, 1), (True, 0), (True, None)])
+def test_cold_open_disabled_preserves_json(
+    monkeypatch: pytest.MonkeyPatch, strategy: str, enabled: bool, allowance: int | None
+) -> None:
+    shots, assets = _day()
+    params = RoughCutParams(target_s=60, strategy=strategy)
+    profile = (
+        StyleProfile(shot_duration_s=DEFAULT_PACING, cuts_per_min=20, cold_open_clips=allowance)
+        if allowance is not None
+        else None
+    )
+    baseline = rough_cut(shots, assets, params).model_dump_json().encode()
+
+    def unexpected_move(*args: object, **kwargs: object) -> list[Clip]:
+        pytest.fail("disabled cold open must bypass the helper")
+
+    monkeypatch.setattr("vlogcut.plan.rules.apply_cold_open", unexpected_move)
+    assert rough_cut(shots, assets, params, profile).model_dump_json().encode() == baseline
+    actual = rough_cut(shots, assets, params, profile, cold_open=enabled)
+    assert actual.model_dump_json().encode() == baseline
+
+
+@pytest.mark.parametrize("strategy", ["coverage", "highlights"])
+@pytest.mark.parametrize("allowance", [1, 3])
+@pytest.mark.parametrize("custom_score,hook", [(False, 4), (True, 3)])
+def test_rough_cut_cold_open_moves_highest_scoring_later_clip(
+    strategy: str, allowance: int, custom_score: bool, hook: int
+) -> None:
+    shots = [_shot("a", i, sharpness=q) for i, q in enumerate([200, 200, 20, 40, 160, 80])]
+    assets = [_asset("a", 0)]
+    params = RoughCutParams(target_s=12, strategy=strategy)
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=2, median=2, p90=2),
+        cuts_per_min=30,
+        cold_open_clips=allowance,
+        transitions=TransitionMix(hard_cut=0, dissolve=1),
+    )
+
+    def score(shot: Shot) -> float:
+        return -shot.quality.sharpness if custom_score else score_shot(shot)
+
+    plain = rough_cut(shots, assets, params, profile, score=score)
+    moved = rough_cut(shots, assets, params, profile, score=score, cold_open=True)
+    assert [c.shot_id for c in moved.clips] == [shots[hook].shot_id] + [
+        s.shot_id for i, s in enumerate(shots) if i != hook
+    ]
+    assert moved.total_duration_s == plain.total_duration_s == 12
+    before = {c.shot_id: c for c in plain.clips}
+    for clip in moved.clips:
+        original = before[clip.shot_id]
+        assert clip.model_dump(exclude={"transition_in"}) == original.model_dump(
+            exclude={"transition_in"}
+        )
+        expected = (
+            Transition()
+            if clip.shot_id in {shots[i].shot_id for i in (0, hook, hook + 1)}
+            else original.transition_in
+        )
+        assert clip.transition_in == expected
+    assert validate_edl(moved, shots, profile, target_s=12) == []
+    assert "not_chronological" in {v.code for v in validate_edl(moved, shots)}
+
+
+def _hook_clips(shots: list[Shot]) -> list[Clip]:
+    return [
+        Clip(
+            shot_id=s.shot_id,
+            in_s=0.25,
+            out_s=2.25 + i / 4,
+            speed=1 + i / 4,
+            audio="duck" if i % 2 else "mute",
+            transition_in=Transition(kind="dissolve", duration_s=0.2),
+        )
+        for i, s in enumerate(shots)
+    ]
+
+
+@pytest.mark.parametrize("count", [3, 6])
+def test_apply_cold_open_ties_choose_last_and_preserve_inputs(count: int) -> None:
+    shots = [_shot("a", i) for i in range(count)]
+    clips = _hook_clips(shots)
+    before_clips = [c.model_dump() for c in clips]
+    before_shots = [s.model_dump() for s in shots]
+    moved = apply_cold_open(clips, _by_id(shots))
+    assert [c.shot_id for c in moved] == [clips[-1].shot_id] + [c.shot_id for c in clips[:-1]]
+    assert sum(c.timeline_duration_s for c in moved) == pytest.approx(
+        sum(c.timeline_duration_s for c in clips)
+    )
+    for position, original_index in enumerate([count - 1, *range(count - 1)]):
+        expected = before_clips[original_index].copy()
+        if position < 2:
+            expected["transition_in"] = Transition().model_dump()
+        assert moved[position].model_dump() == expected
+    assert [c.model_dump() for c in clips] == before_clips
+    assert [s.model_dump() for s in shots] == before_shots
+
+
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_apply_cold_open_short_timeline_is_unchanged(count: int) -> None:
+    shots = [_shot("a", i) for i in range(count)]
+    clips = _hook_clips(shots)
+    assert apply_cold_open(clips, _by_id(shots)) == clips
+
+
+@pytest.mark.parametrize(
+    "groups,expected",
+    [
+        (["x", None, None, None, "x", None], 5),  # hook conflicts with first clip
+        ([None, None, None, "x", None, "x"], 5),  # removal would join duplicates
+        (["x", "y", "z", "x", "y", "x"], 1),  # all later-half moves conflict
+        (["x", "y", "x"], None),  # every possible move conflicts
+        (["", "y", ""], None),  # empty strings are non-null groups too
+    ],
+)
+def test_apply_cold_open_duplicate_fallback(
+    groups: list[str | None], expected: int | None, caplog: pytest.LogCaptureFixture
+) -> None:
+    shots = [_shot("a", i, sharpness=q) for i, q in enumerate([200, 200, 20, 40, 160, 80])]
+    shots = shots[: len(groups)]
+    for shot, group in zip(shots, groups, strict=True):
+        shot.dup_group = group
+    clips = _hook_clips(shots)
+    before = [c.model_dump() for c in clips]
+    with caplog.at_level("DEBUG", logger="vlogcut.plan.rules"):
+        moved = apply_cold_open(clips, _by_id(shots))
+    if expected is None:
+        assert moved == clips
+        assert "Skipping cold open" in caplog.text
+    else:
+        assert [c.shot_id for c in moved] == [shots[expected].shot_id] + [
+            s.shot_id for i, s in enumerate(shots) if i != expected
+        ]
+        by_id = _by_id(shots)
+        for left, right in zip(moved, moved[1:], strict=False):
+            group = by_id[left.shot_id].dup_group
+            assert group is None or group != by_id[right.shot_id].dup_group
+    assert [c.model_dump() for c in clips] == before
 
 
 @pytest.mark.parametrize("strategy", ["coverage", "highlights"])
