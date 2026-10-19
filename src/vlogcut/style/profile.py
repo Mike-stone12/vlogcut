@@ -46,7 +46,9 @@ class ReferenceCuts(BaseModel):
     """Raw cut times of one reference; cached, since detection is the expensive step."""
 
     asset_id: str
-    source: str  # absolute in memory, workspace-relative in cache JSON when internal
+    # Path as given (for StyleProfile.source_refs); workspace-relative in cache JSON
+    # when it lies inside the workspace.
+    source: str
     duration_s: float = Field(gt=0)
     params: ReferenceParams
     cuts: list[float]  # hard cuts + dissolve midpoints, seconds
@@ -266,7 +268,6 @@ def analyze_reference(
     """Cut times of one reference (cached by asset fingerprint + params)."""
     params = params or ReferenceParams()
     workspace = Path(workspace).resolve()
-    path = Path(path).resolve()
     asset = make_proxy(probe_asset(path), workspace)
     cache_path = workspace / "style" / f"{asset.asset_id}.cuts.json"
     cached = _load_cache(cache_path, asset.asset_id, params, workspace)

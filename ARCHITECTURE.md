@@ -334,8 +334,10 @@ Planned additions (remaining fields land with the module that needs them):
 
 Cached JSON stores paths inside the workspace as relative POSIX strings, so a moved
 workspace stays valid. External source paths stay absolute. Cache readers resolve
-relative paths against the current workspace and preserve legacy absolute paths;
-in-memory path fields remain absolute strings with unchanged schema types.
+relative paths against the current workspace and preserve legacy absolute paths.
+In-memory media and keyframe paths remain absolute strings with unchanged schema
+types. Reference analysis preserves the supplied source string for
+`ReferenceCuts.source` and `StyleProfile.source_refs` on both cache misses and hits.
 
 ## Model roles
 
@@ -484,6 +486,8 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   Reference-cut caches store internal `source` paths relatively and external sources
   absolutely. Readers restore absolute strings before file checks or downstream use;
   old absolute-path caches still qualify as hits without migration or key changes.
+  Reference analysis keeps the caller's source string for profile provenance on
+  both misses and hits. The pipeline's `shots.json` snapshot has no reader yet.
   Ingest stores proxy media but no JSON; caption and pause caches contain no paths.
   Schema types, EDL output and the planned Run manifest are unchanged. Offline tests
   rename a populated workspace and fail if detection or quality analysis runs again.

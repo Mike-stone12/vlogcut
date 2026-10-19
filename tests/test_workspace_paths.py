@@ -110,9 +110,15 @@ def test_analysis_caches_relocate_or_load_legacy_paths(
 
 @pytest.mark.parametrize("internal", [False, True])
 @pytest.mark.parametrize("legacy_absolute", [False, True])
+@pytest.mark.parametrize("relative_input", [False, True])
 def test_reference_cache_paths(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, internal: bool, legacy_absolute: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    internal: bool,
+    legacy_absolute: bool,
+    relative_input: bool,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     workspace = tmp_path / "original"
     workspace.mkdir()
     source = (workspace if internal else tmp_path) / "reference.mp4"
@@ -121,13 +127,15 @@ def test_reference_cache_paths(
     monkeypatch.setattr(profile, "make_proxy", lambda asset, ws: asset)
     monkeypatch.setattr(shots, "detect_cuts", lambda *a, **kw: [2.0])
     params = profile.ReferenceParams(dissolves=False, beats=False)
-    first = profile.analyze_reference(source, workspace, params)
+    supplied = str(source.relative_to(tmp_path) if relative_input else source)
+    first = profile.analyze_reference(supplied, workspace, params)
     cache_path = workspace / "style/a.cuts.json"
     document = json.loads(cache_path.read_text(encoding="utf-8"))
     assert document["source"] == ("reference.mp4" if internal else str(source))
-    assert first.source == str(source)
+    assert first.source == supplied
     if legacy_absolute:
-        cache_path.write_text(first.model_dump_json(), encoding="utf-8")
+        document["source"] = str(source)
+        cache_path.write_text(json.dumps(document), encoding="utf-8")
     else:
         moved = tmp_path / "renamed"
         workspace.rename(moved)
@@ -139,7 +147,9 @@ def test_reference_cache_paths(
     monkeypatch.setattr(shots, "detect_cuts", _fail)
     loaded = profile._load_cache(cache_path, "a", params, workspace)
     assert loaded is not None and loaded.source == str(source)
-    second = profile.analyze_reference(source, workspace, params)
-    assert second.source == str(source)
+    supplied = str(source.relative_to(tmp_path) if relative_input else source)
+    second = profile.analyze_reference(supplied, workspace, params)
+    assert second.source == supplied
+    assert profile.aggregate([second], params).source_refs == [supplied]
     assert second.cuts == first.cuts
     assert cache_path.read_bytes() == before

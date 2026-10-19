@@ -339,7 +339,9 @@ def test_analyze_reference_records_only_surviving_dissolves(
     assert record.cuts == [10, 20]
     assert record.dissolve_cuts == [record.cuts[1]]
     cached = tmp_path / "style" / "a.cuts.json"
-    assert ReferenceCuts.model_validate_json(cached.read_text(encoding="utf-8")) == record
+    assert ReferenceCuts.model_validate_json(
+        cached.read_text(encoding="utf-8")
+    ) == record.model_copy(update={"source": str(Path("a.mp4").resolve())})
 
 
 @pytest.mark.parametrize("detection", [False, True])
@@ -377,7 +379,9 @@ def test_old_reference_cache_is_recomputed(
     record = analyze_reference("a.mp4", tmp_path, params)
     assert record.cuts == [10, 20]
     assert record.dissolve_cuts == ([20] if detection else [])
-    assert ReferenceCuts.model_validate_json(cache.read_text(encoding="utf-8")) == record
+    assert ReferenceCuts.model_validate_json(
+        cache.read_text(encoding="utf-8")
+    ) == record.model_copy(update={"source": str(Path("a.mp4").resolve())})
     monkeypatch.setattr(shots_mod, "detect_cuts", lambda *a, **k: pytest.fail("re-detected"))
     assert analyze_reference("a.mp4", tmp_path, params) == record
 
@@ -412,7 +416,9 @@ def test_old_beat_cache_is_recomputed_and_beats_switch_invalidates(
     monkeypatch.setattr(beats_mod, "detect_beats", detect)
     record = analyze_reference("a.mp4", tmp_path, params)
     assert record.beats == [10, 20]
-    assert ReferenceCuts.model_validate_json(cache.read_text(encoding="utf-8")) == record
+    assert ReferenceCuts.model_validate_json(
+        cache.read_text(encoding="utf-8")
+    ) == record.model_copy(update={"source": str(Path("a.mp4").resolve())})
     monkeypatch.setattr(beats_mod, "detect_beats", lambda *a: pytest.fail("re-detected beats"))
     monkeypatch.setattr(pauses_mod, "load_mono_audio", lambda *a: pytest.fail("re-decoded"))
     assert analyze_reference("a.mp4", tmp_path, params) == record
