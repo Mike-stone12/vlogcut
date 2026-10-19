@@ -11,6 +11,7 @@ import json
 import logging
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import file_digest, sha256
 from pathlib import Path
 from threading import Lock
 from typing import Literal, TypeVar
@@ -21,7 +22,8 @@ from vlogcut.ingest import ProbeError, make_proxy, probe_asset
 from vlogcut.learn.ranker import RankerModel, score
 from vlogcut.llm.router import ModelRouter
 from vlogcut.paths import to_workspace_relative
-from vlogcut.schemas import EDL, MediaAsset, MusicCue, Shot, StyleProfile
+from vlogcut.run import run_id
+from vlogcut.schemas import EDL, MediaAsset, MusicCue, Run, RunInputs, Shot, StyleProfile
 from vlogcut.validate import Violation, repair_edl, validate_edl
 
 log = logging.getLogger(__name__)
@@ -43,6 +45,7 @@ class CutResult(BaseModel):
     edl: EDL
     edl_path: Path
     preview_path: Path | None
+    manifest: Path
     profile: StyleProfile | None = None  # the style the cut was paced with, if any
     violations: list[Violation] = Field(default_factory=list)
     repaired: bool = False
@@ -277,6 +280,28 @@ def cut(
     assets, skipped = ingest(files, workspace, progress, **worker_options)
     if not assets:
         raise FileNotFoundError(f"none of the {len(files)} files in {folder} is usable footage")
+    music_sha256 = None
+    if music is not None:
+        with music.open("rb") as handle:
+            music_sha256 = file_digest(handle, "sha256").hexdigest()
+    inputs = RunInputs(
+        asset_ids=[asset.asset_id for asset in assets],
+        target_s=target_s,
+        strategy=strategy,
+        planner=planner,
+        planner_model=router.roles["planner"].model if planner == "llm" else None,
+        profile_sha256=sha256(profile.model_dump_json().encode("utf-8")).hexdigest()
+        if profile is not None
+        else None,
+        music_sha256=music_sha256,
+        ranker_sha256=sha256(ranker.model_dump_json().encode("utf-8")).hexdigest()
+        if ranker is not None
+        else None,
+        brief=brief or "",
+        constraints=list(constraints or ()),
+        cold_open=cold_open,
+        caption=caption,
+    )
     caption_options = {"caption": True, "router": router} if caption else {}
     shots = analyze(assets, workspace, progress, **worker_options, **caption_options)
     ranker_scores = {shot.shot_id: score(ranker, shot) for shot in shots} if ranker else None
@@ -323,7 +348,7 @@ def cut(
         else:
             log.warning("No beats detected in %s; leaving EDL unsnapped", music)
         edl.music = [MusicCue(track_id="music", gain_db=music_gain_db)]
-    # outputs with and without a style sit side by side (the run manifest replaces this)
+    # Keep existing output names; run manifests distinguish their inputs separately.
     name = f"{strategy}_{target_s:.0f}s" + (f"_{style.stem}" if style else "")
     if used_planner == "llm":
         name += "_llm"
@@ -359,8 +384,23 @@ def cut(
             music={"music": music} if music else None,
             params=PreviewParams(**(preview_params or {})),
         )  # fmt: skip
+    manifest = Run(
+        run_id=run_id(inputs), inputs=inputs, variant_id=edl_path.stem,
+        edl=to_workspace_relative(edl_path, workspace),
+        violations=to_workspace_relative(edl_path.with_suffix(".violations.json"), workspace),
+        preview=to_workspace_relative(preview, workspace) if preview is not None else None,
+    )  # fmt: skip
+    manifest_path = workspace / "runs" / f"{manifest.run_id}.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    temp = manifest_path.with_suffix(".json.part")
+    try:
+        temp.write_bytes(manifest.model_dump_json(indent=1).encode("utf-8"))
+        temp.replace(manifest_path)
+    finally:
+        temp.unlink(missing_ok=True)
     return CutResult(
         assets=assets, skipped=skipped, shots=shots, edl=edl, edl_path=edl_path,
+        manifest=manifest_path,
         preview_path=preview, profile=profile, violations=violations, repaired=repaired,
         planner=used_planner, fallback=fallback, repair_rounds=repair_rounds,
     )  # fmt: skip

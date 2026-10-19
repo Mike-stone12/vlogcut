@@ -234,6 +234,7 @@ def _cut(args: argparse.Namespace) -> int:
         print(f"  {clip}{violation.code}: {violation.message}")
     if result.preview_path:
         print(f"preview   {result.preview_path}")
+    print(f"manifest  {result.manifest}")
     print(f"done in {time.perf_counter() - started:.1f} s")
     return 0
 

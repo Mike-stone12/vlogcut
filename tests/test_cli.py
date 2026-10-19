@@ -277,6 +277,7 @@ def test_cut_reports_validation_ok(
     assert cli.main(["cut", str(tmp_path), "--no-render"]) == 0
     out = capsys.readouterr().out
     assert "validation: OK\n" in out
+    assert out.count(f"manifest  {result.manifest}\n") == 1
     assert out.count("repaired EDL\n") == int(repaired)
     if repaired:
         assert out.index("repaired EDL\n") < out.index("validation: OK\n")
@@ -290,6 +291,7 @@ def _cut_result(tmp_path: Path, violations: list[Violation]) -> CutResult:
             clips=[Clip(shot_id="s", in_s=0, out_s=3)],
         ),
         edl_path=tmp_path / "coverage_3s.json", preview_path=None, violations=violations,
+        manifest=tmp_path / "runs" / "0123456789abcdef.json",
     )  # fmt: skip
 
 

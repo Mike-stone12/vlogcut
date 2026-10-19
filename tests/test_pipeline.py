@@ -1,6 +1,7 @@
 import json
 import logging
 import math
+from hashlib import sha256
 from pathlib import Path
 from threading import Event, Lock
 from time import sleep
@@ -22,6 +23,7 @@ from vlogcut.schemas import (
     MediaAsset,
     MusicCue,
     QualityFlags,
+    Run,
     Shot,
     StyleProfile,
     Transition,
@@ -78,6 +80,60 @@ def _edl(shot_id: str = "s") -> EDL:
         variant_id="test", target_duration_s=1,
         clips=[Clip(shot_id=shot_id, in_s=0, out_s=1)],
     )  # fmt: skip
+
+
+@pytest.mark.parametrize("render", [False, True])
+def test_run_manifest_outputs_and_atomic_deterministic_overwrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_analysis: None, render: bool
+) -> None:
+    def preview(*args: Any, **kwargs: Any) -> None:
+        args[4].write_bytes(b"preview")
+
+    monkeypatch.setattr("vlogcut.render.render_preview", preview)
+    original_replace = Path.replace
+    replacements = []
+
+    def replace(source: Path, destination: Path) -> Path:
+        if destination.parent.name == "runs":
+            assert source == destination.with_suffix(".json.part")
+            manifest = Run.model_validate_json(source.read_bytes())
+            for value in (manifest.edl, manifest.violations, manifest.preview):
+                if value is not None:
+                    assert not Path(value).is_absolute() and "\\" not in value
+                    assert (tmp_path / value).is_file()
+            replacements.append(destination)
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(Path, "replace", replace)
+    assets, _ = pipeline.ingest([], tmp_path)
+    expected = plan.rough_cut(_shots(), assets, plan.RoughCutParams(target_s=3))
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(expected.model_dump_json(indent=1), encoding="utf-8")
+    result = pipeline.cut(tmp_path, tmp_path, target_s=3, render=render)
+    manifest_bytes = result.manifest.read_bytes()
+    manifest = Run.model_validate_json(manifest_bytes)
+    assert result.manifest == tmp_path / "runs" / f"{manifest.run_id}.json"
+    assert manifest.inputs.asset_ids == ["a"]
+    assert manifest.inputs.planner == "rules" and manifest.inputs.planner_model is None
+    assert manifest.variant_id == "coverage_3s"
+    assert manifest.edl == "edl/coverage_3s.json"
+    assert manifest.violations == "edl/coverage_3s.violations.json"
+    assert manifest.preview == ("preview_coverage_3s.mp4" if render else None)
+    assert result.edl_path.read_bytes() == baseline.read_bytes()
+    report_bytes = result.edl_path.with_suffix(".violations.json").read_bytes()
+    result.manifest.write_bytes(b"stale manifest")
+    repeated = pipeline.cut(tmp_path, tmp_path, target_s=3, render=render)
+    assert repeated.manifest.read_bytes() == manifest_bytes
+    assert replacements == [result.manifest, result.manifest]
+    assert not list(result.manifest.parent.glob("*.part"))
+    changed = pipeline.cut(
+        tmp_path, tmp_path, target_s=3, render=render, brief="New brief", constraints=["  "]
+    )
+    assert changed.manifest != result.manifest
+    assert changed.edl_path == result.edl_path
+    assert changed.edl_path.read_bytes() == baseline.read_bytes()
+    assert changed.edl_path.with_suffix(".violations.json").read_bytes() == report_bytes
+    assert Run.model_validate_json(changed.manifest.read_bytes()).inputs.constraints == ["  "]
 
 
 @pytest.mark.parametrize("workers", [1, 3])
@@ -154,6 +210,10 @@ def test_ranker_scores_all_shots_after_captioning_and_reaches_rules(
     assert forwarded[0] == {"s": 5.0, "rejected": 3.0, "short": 3.0}
     assert all(math.isfinite(value) for value in forwarded[0].values())
     assert result.fallback == (planner == "llm")
+    inputs = Run.model_validate_json(result.manifest.read_bytes()).inputs
+    assert inputs.ranker_sha256 == sha256(ranker_model.model_dump_json().encode()).hexdigest()
+    assert inputs.caption and inputs.planner == planner
+    assert inputs.planner_model == ("test-planner" if planner == "llm" else None)
     assert all(clip.shot_id == "s" for clip in result.edl.clips)
 
 
@@ -218,7 +278,7 @@ def test_music_snaps_before_validation_and_repair(
     monkeypatch.setattr(plan, "rough_cut", lambda *args, **kwargs: edl)
     router = _router(tmp_path, FakeClient([edl.model_dump_json()])) if planner == "llm" else None
     music = tmp_path / "music.wav"
-    music.touch()
+    music.write_bytes(b"user-supplied music")
     samples = object()
     calls: list[tuple[object, int]] = []
 
@@ -248,6 +308,9 @@ def test_music_snaps_before_validation_and_repair(
         planner=planner, router=router, max_repair_rounds=0,
     )  # fmt: skip
     assert calls == [(samples, BeatParams().sample_rate)]
+    inputs = Run.model_validate_json(result.manifest.read_bytes()).inputs
+    assert inputs.profile_sha256 == sha256(profile.model_dump_json().encode()).hexdigest()
+    assert inputs.music_sha256 == sha256(music.read_bytes()).hexdigest()
     assert result.edl.clips[0].timeline_duration_s == pytest.approx(0.71)
     assert result.edl.clips[1].in_s == pytest.approx(0.95)
     assert result.edl.music == [MusicCue(track_id="music", gain_db=-14)]
@@ -449,7 +512,12 @@ def test_cut_llm_ignores_cold_open_without_changing_prompt(
                 cold_open=cold_open,
             )  # fmt: skip
         )
-    assert results[0] == results[1]
+    assert results[0].model_dump(exclude={"manifest"}) == results[1].model_dump(
+        exclude={"manifest"}
+    )
+    assert results[0].manifest != results[1].manifest
+    for result, enabled in zip(results, (False, True), strict=True):
+        assert Run.model_validate_json(result.manifest.read_bytes()).inputs.cold_open == enabled
     assert results[1].planner == "llm" and results[1].repair_rounds == 1
     assert clients[0].requests == clients[1].requests
     warnings = [r for r in caplog.records if "ignores cold_open" in r.message]
@@ -610,7 +678,7 @@ def test_parallel_analysis_preserves_outputs_and_caches(
         baseline = pipeline.cut(tmp_path, tmp_path, target_s=9, render=False, workers=1)
     assert completed == ["0", "1", "2"]
     expected = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*.json")}
-    assert len(expected) == 12  # shot, quality, pause caches plus shots, EDL and violations
+    assert len(expected) == 13  # caches plus shots, EDL, violations and run manifest
     for path in expected:
         (tmp_path / path).unlink()
     completed.clear()
@@ -1024,6 +1092,9 @@ def test_rules_constraints_preserve_edl_and_warn_once(
     report_bytes = baseline.edl_path.with_suffix(".violations.json").read_bytes()
     caplog.clear()
     result = pipeline.cut(tmp_path, tmp_path, target_s=3, render=False, constraints=constraints)
+    assert Run.model_validate_json(result.manifest.read_bytes()).inputs.constraints == list(
+        constraints or ()
+    )
     assert result.edl_path.read_bytes() == edl_bytes
     assert result.edl_path.with_suffix(".violations.json").read_bytes() == report_bytes
     warnings = [record for record in caplog.records if record.levelno == logging.WARNING]

@@ -279,6 +279,44 @@ class EDL(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Run manifests
+# ---------------------------------------------------------------------------
+
+
+class RunInputs(BaseModel):
+    """Fingerprint inputs; hashes describe loaded models or supplied music bytes."""
+
+    asset_ids: list[str]
+    target_s: float
+    strategy: str
+    planner: Literal["rules", "llm"]
+    planner_model: str | None = None
+    profile_sha256: str | None = None
+    music_sha256: str | None = None
+    ranker_sha256: str | None = None
+    brief: str = ""
+    constraints: list[str] = Field(default_factory=list)
+    cold_open: bool = False
+    caption: bool = False
+
+    @field_validator("asset_ids")
+    @classmethod
+    def _sort_assets(cls, value: list[str]) -> list[str]:
+        return sorted(value)
+
+
+class Run(BaseModel):
+    """One run's inputs and output paths; variant IDs remain EDL file stems."""
+
+    run_id: str
+    inputs: RunInputs
+    variant_id: str
+    edl: str
+    violations: str
+    preview: str | None
+
+
+# ---------------------------------------------------------------------------
 # Feedback
 # ---------------------------------------------------------------------------
 
