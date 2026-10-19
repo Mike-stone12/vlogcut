@@ -9,8 +9,8 @@ Week-1 baseline and, later, the fallback when the planner's EDL cannot be repair
    the k best overall, then re-sorted by time; replace adjacent duplicate-group
    picks when a chronological, conflict-free alternative exists
 4. sample the profile's length distribution, using its mean to choose k; assign long
-   samples to shots with room, shape intro pacing, then fit with one shared offset clamped
-   to p10..p90 and each shot's usable part; grow / shrink k until within tolerance
+   samples to shots with room, shape intro pacing and montage bursts, then fit with
+   one shared offset clamped to p10..p90 and each shot's usable part; adjust k to fit
 5. place each clip in the middle of the usable part; shots kept for their audio
    (someone talking) start at the beginning of the usable part and run as long as the
    pacing allows, so speech is less likely to be cut mid-sentence
@@ -162,6 +162,65 @@ def apply_intro_pace(
         min(cap, max(floor, length * ratio)) if i < n_intro else length
         for i, (length, floor, cap) in enumerate(zip(base, floors, caps, strict=True))
     ]
+
+
+def apply_montage(
+    base: Sequence[float],
+    caps: Sequence[float],
+    talking: Sequence[bool],
+    pace: DurationStats,
+    share: float | None,
+    target: float,
+) -> list[float]:
+    """Shape bases into late montage runs, leaving bounds and talking bases intact.
+
+    Inputs follow timeline order and have equal lengths; caps are at least p10.
+    Aim for round(share * k) clips in runs of >=3, filling eligible runs from the
+    end backwards (their suffixes first), favouring the body over the intro.
+    Talking clips split runs. Use p10 rounded up plus 1 ms for short bases, and
+    spread any target deficit over non-burst, non-talking headroom proportionally.
+    The unchanged shared-offset fit must leave bursts 1 ms below median/2, so
+    in/out rounding cannot erase them. Try fewer burst clips if capacity prevents
+    this; if even three cannot fit, return the original bases. Missing/zero share,
+    too few requested clips, or no representable short duration are exact no-ops.
+    """
+    wanted = round(share * len(base)) if share else 0
+    short = math.ceil(pace.p10 * 1000) / 1000 + 0.001
+    limit = pace.median / 2 - 0.001
+    if wanted < 3 or short >= limit:
+        return list(base)
+    runs: list[list[int]] = []
+    run: list[int] = []
+    for i, (cap, is_talking) in enumerate(zip(caps, talking, strict=True)):
+        if not is_talking and cap >= short:
+            run.append(i)
+        else:
+            if len(run) >= 3:
+                runs.append(run)
+            run = []
+    if len(run) >= 3:
+        runs.append(run)
+    floors = [pace.p10] * len(base)
+    for count in range(min(wanted, sum(map(len, runs))), 2, -1):
+        burst: set[int] = set()
+        for run in reversed(runs):
+            take = min(len(run), count - len(burst))
+            if take >= 3:
+                burst.update(run[-take:])
+        shaped = [
+            short if i in burst else min(cap, max(pace.p10, length))
+            for i, (length, cap) in enumerate(zip(base, caps, strict=True))
+        ]
+        room = [
+            cap - length if i not in burst and not talking[i] else 0.0
+            for i, (length, cap) in enumerate(zip(shaped, caps, strict=True))
+        ]
+        fraction = min(1.0, max(0.0, target - sum(shaped)) / sum(room)) if sum(room) else 0.0
+        shaped = [length + fraction * extra for length, extra in zip(shaped, room, strict=True)]
+        fitted = fit_lengths(shaped, floors, caps, target)
+        if all(fitted[i] <= limit for i in burst):
+            return shaped
+    return list(base)
 
 
 def fit_lengths(base: Sequence[float], lo: Sequence[float], hi: Sequence[float], target: float):
@@ -391,6 +450,7 @@ def rough_cut(
     intro_ratio = (
         profile.structure.intro_pace_ratio if profile is not None and profile.structure else None
     )
+    montage = profile.structure.montage_share if profile is not None and profile.structure else None
     by_id = {a.asset_id: a for a in assets}
 
     ordered = sorted(shots, key=lambda s: (order_key(by_id.get(s.asset_id)), s.asset_id, s.start_s))
@@ -411,7 +471,7 @@ def rough_cut(
     seen: set[int] = set()
     while True:
         picked = select(cands, k, params.strategy)
-        lengths = _lengths(picked, pace, target, intro_ratio)
+        lengths = _lengths(picked, pace, target, intro_ratio, montage)
         total = sum(lengths)
         seen.add(len(picked))
         if total < target * (1 - tol) and len(picked) < len(cands) and len(picked) + 1 not in seen:
@@ -458,6 +518,7 @@ def _lengths(
     pace: DurationStats,
     target: float,
     intro_ratio: float | None = None,
+    montage: float | None = None,
 ) -> list[float]:
     caps = [min(pace.p90, c.avail) for c in picked]
     floors = [min(pace.p10, cap) for cap in caps]
@@ -473,6 +534,8 @@ def _lengths(
         for i, c in enumerate(picked):
             if c.talking:
                 base[i] = caps[i]
+    if montage:
+        base = apply_montage(base, caps, [c.talking for c in picked], pace, montage, target)
     return fit_lengths(base, floors, caps, target)
 
 
