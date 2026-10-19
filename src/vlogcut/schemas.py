@@ -154,6 +154,8 @@ class StyleProfile(BaseModel):
     beat_aligned_ratio: float | None = Field(default=None, ge=0, le=1)  # None = not measured
     bpm_range: tuple[float, float] | None = None
     intro_s: float | None = None
+    # User-set leading clips exempt from chronology; 0 disables cold opens.
+    cold_open_clips: int = Field(default=0, ge=0)
     speech_ratio: float | None = Field(default=None, ge=0, le=1)  # None = not measured
     transitions: TransitionMix | None = None  # None = not measured
     look: dict[str, float] = Field(default_factory=dict)  # brightness, saturation, warmth...

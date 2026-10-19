@@ -96,7 +96,8 @@ flags are skipped: references are finished edits), then aggregate:
 - Structure ("grammar"): intro length, speech ratio, talking ↔ b-roll alternation
   (transition counts between shot kinds), montage bursts (runs of short shots), cold
   open present or not. Pacing alone reads as a speed slider; structure is what makes a
-  cut recognisably someone's.
+  cut recognisably someone's. Cold-open allowance is user-set; reference measurement
+  and planner support remain planned. Planners do not yet produce cold opens.
 - Transitions: share of hard cuts / dissolves (from `analyze/transitions.py`); fades
   through black currently count as two dissolves
 - Audio: speech-over-music ratio, whether clip audio is kept under music
@@ -240,6 +241,14 @@ until its analysis is wired in: `None` means "not measured", which is not the sa
 JSON without this field still loads. The mix is unmeasured when dissolve detection is off
 or no cuts survive merging. Profiles still require at least one cut to describe pacing.
 
+`StyleProfile.cold_open_clips` is a non-negative, user-set integer defaulting to 0
+(no cold open), including when absent from old profile JSON. It exempts the first
+`min(cold_open_clips, len(clips))` EDL clips from chronology only: a hook from later
+in the day can precede the day from the beginning. Chronology starts afresh among
+the remaining clips; all other checks still apply to the opening clips. Reference
+analysis does not measure this allowance and keeps the default. It is not a style
+distance dimension; planners do not yet produce cold opens.
+
 `Clip.transition_in: Transition` defaults to a hard cut, so old EDL JSON still loads.
 `Transition.kind` is `cut` or `dissolve`; `duration_s` is 0 for a cut and strictly
 positive for a dissolve. The first EDL clip must enter with a cut. A dissolve is
@@ -259,7 +268,7 @@ Planned additions (not yet in `schemas.py`; each lands with the module that need
 |---|---|
 | `MusicCue.end_s`, ducking params | music mixing needs an end and a level under speech |
 | `Shot.kind` (talking / broll) | structure dimension |
-| `StyleProfile.structure`, `.cold_open_clips` | the "grammar" dimensions |
+| `StyleProfile.structure` | the "grammar" dimensions |
 | `Run` manifest (inputs fingerprint → outputs) | EDL file names collide once profile version, brief, variant and model all vary |
 
 Cached JSON should store paths relative to the workspace so a moved workspace stays
@@ -361,6 +370,7 @@ unrelated footage in a way viewers recognise. Protocol:
 - [x] Week 2 · style distance + round-trip eval (`style/distance.py`,
       `vlogcut style show / diff`, `tests/test_style_distance.py`)
 - [x] Week 2 · rules planner reproduces the profile's shot-length distribution
+- [x] Week 3 · structure: StyleProfile.cold_open_clips honoured by chronology check (schemas.py, validate/checks.py)
 - [x] Week 3 · style: transition mix from references (`style/profile.py`)
 - [x] Week 3 · style: beat-aligned cut ratio from references (style/profile.py)
 
@@ -685,10 +695,10 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   `target_s=None` skips the target check, even when the EDL declares a target;
   `profile=None` skips pacing and transition-mix checks. Unmeasured mixes allow
   dissolves. `usable_range` is a suggestion and is not enforced. `Shot.dup_group`
-  exists and is checked; cold opens remain unsupported until
-  `StyleProfile.cold_open_clips` exists. No audio check until a profile dimension
-  exists. `Violation`, like `StyleDistance`, is an analysis result outside
-  `schemas.py`. Checks now run after planning in `pipeline.cut`, writing
+  exists and is checked; cold opens are now allowed by the user-set
+  `StyleProfile.cold_open_clips` chronology exemption (2026-11-11). No audio check
+  until a profile dimension exists. `Violation`, like `StyleDistance`, is an
+  analysis result outside `schemas.py`. Checks now run after planning in `pipeline.cut`, writing
   `edl/<stem>.violations.json`; the CLI reports them and violations are non-fatal.
   Repair, fallback fixes and beat snapping remain planned. The rules planner can still
   miss the requested target when footage is insufficient; it now avoids adjacent
@@ -907,6 +917,20 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   errors produce one line through `_fail` and exit 1; success exits 0. Empty input
   or absent picks/rejects yields `[]`. No schema or pipeline changes, multi-variant
   generation, Run manifest, feedback classification or ranker wiring.
+
+- 2026-11-11: cold-open allowance — **schema change**: user-editable
+  `StyleProfile.cold_open_clips: int` is non-negative and defaults to 0, including
+  for old profile JSON. With N > 0, chronology ignores the first
+  `min(N, len(clips))` EDL clips. These may use any shots in any order, including
+  shots reused later. The first remaining clip starts a fresh chronology check;
+  subsequent known shots must strictly increase in supplied shot order, including
+  across unknown IDs, and repeated shots in this remainder still fail. With no
+  profile or N = 0, checks and violation output are unchanged. All other checks
+  apply to cold-open clips, including duplicate groups between actual neighbours
+  within the opening and across its boundary; violation ordering is unchanged.
+  Reference analysis keeps the default; notes, summaries and style distance do not
+  use this field. Planners do not yet produce cold opens; planner support and
+  reference measurement remain planned. Repair, pipeline and CLI are unchanged.
 
 ## Open questions
 
