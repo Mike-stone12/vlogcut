@@ -77,7 +77,9 @@ ingest → analyze → plan → validate/repair → render/export → feedback
 - Shot kind (planned): `talking` / `broll` from VAD + caption; feeds the structure
   dimension of the style profile and the planner
 - Caption: **captioner** role (VLM) on 1–3 keyframes → description, tags, interest 1–5.
-  Only for shots that survive quality + dedup; the cache key includes the model name
+  The core exists in `analyze/caption.py` via `ModelRouter`, but is not wired into
+  the pipeline or CLI. Quality + dedup filtering and caching (with the model name
+  in the cache key) remain planned
 - Cut-point candidates: energy-based audio pauses populate `Shot.cut_points` during
   analysis. The rules planner shifts fixed-length clips onto nearby candidates after
   length fitting and rounding. Beats of the chosen music, motion minima and LLM
@@ -372,6 +374,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · analyze: captioner core via ModelRouter (analyze/caption.py)
 - [x] Week 5 · feedback: feedback-role classification into edit constraints / profile deltas (feedback/classify.py)
 - [x] Week 3 · structure: rules planner honours intro_pace_ratio (plan/rules.py)
 - [x] Week 5 · feedback: CLI page + pairs subcommands (cli.py)
@@ -1037,6 +1040,17 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   `LookStats` is a local analysis result outside `schemas.py`; no schema change.
   No wiring into `StyleProfile`, distance, planners, pipeline or CLI, and no
   caching, colour matching or grading.
+
+- 2026-10-18: captioner core — `analyze/caption.py` encodes 1–3 JPEG keyframes as
+  base64 image content parts with optional context, then makes exactly one
+  `ModelRouter.complete("captioner", messages)` call, without retries. Plain or
+  fenced JSON validates into `CaptionResult`: stripped non-blank description,
+  stripped unique non-blank tags in input order (at most 10 after normalization),
+  and interest 1–5. Invalid JSON or schema failures raise a one-line `CaptionError`;
+  surrounding prose is not extracted. `CaptionResult` lives outside `schemas.py`
+  as a local analysis result. The core is not wired into the pipeline or CLI;
+  Shot population, caching, quality/dedup filtering and privacy enforcement remain
+  planned. No schema change or new dependency; router behavior is unchanged.
 
 ## Open questions
 
