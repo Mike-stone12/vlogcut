@@ -65,6 +65,12 @@ def _structure_lines(profile: StyleProfile) -> list[str]:
             f"(approximately {ratio * median:.2f} s, "
             "using the profile median as the body estimate)."
         )
+    if structure.kind_alternation is not None:
+        lines.append(
+            f"Talking/b-roll alternation: {structure.kind_alternation:.2f} of adjacent "
+            "talking/b-roll clip pairs switch kind "
+            "(1 = always alternate, 0 = long same-kind runs)."
+        )
     return lines
 
 
