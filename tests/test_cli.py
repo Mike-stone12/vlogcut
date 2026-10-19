@@ -6,8 +6,9 @@ from pathlib import Path
 import pytest
 
 from vlogcut import cli
-from vlogcut.pipeline import find_footage
-from vlogcut.schemas import DurationStats, StyleProfile
+from vlogcut.pipeline import CutResult, find_footage
+from vlogcut.schemas import EDL, Clip, DurationStats, StyleProfile
+from vlogcut.validate import Violation
 
 
 def test_find_footage_filters_and_sorts(tmp_path):
@@ -44,6 +45,44 @@ def test_cli_errors_are_one_line_and_exit_1(tmp_path, capsys):
     assert "invalid style profile" in err and err.count("\n") == 1
 
 
+@pytest.mark.parametrize("clip_index", [0, None])
+def test_cut_reports_violations_without_failing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    clip_index: int | None,
+) -> None:
+    violation = Violation(code="example", clip_index=clip_index, message="Needs attention")
+    result = _cut_result(tmp_path, [violation])
+    monkeypatch.setattr("vlogcut.pipeline.cut", lambda *args, **kwargs: result)
+    assert cli.main(["cut", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "validation: 1 issue" in out
+    prefix = "clip 0: " if clip_index is not None else ""
+    assert f"  {prefix}example: Needs attention\n" in out
+    assert "clip None" not in out
+
+
+def test_cut_reports_validation_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    result = _cut_result(tmp_path, [])
+    monkeypatch.setattr("vlogcut.pipeline.cut", lambda *args, **kwargs: result)
+    assert cli.main(["cut", str(tmp_path), "--no-render"]) == 0
+    assert "validation: OK\n" in capsys.readouterr().out
+
+
+def _cut_result(tmp_path: Path, violations: list[Violation]) -> CutResult:
+    return CutResult(
+        assets=[], skipped=[], shots=[],
+        edl=EDL(
+            variant_id="test", target_duration_s=3,
+            clips=[Clip(shot_id="s", in_s=0, out_s=3)],
+        ),
+        edl_path=tmp_path / "coverage_3s.json", preview_path=None, violations=violations,
+    )  # fmt: skip
+
+
 @pytest.mark.ffmpeg
 def test_only_broken_files_is_a_clean_error(tmp_path, capsys):
     (tmp_path / "broken.mp4").write_bytes(b"\x00" * 64)
@@ -73,6 +112,7 @@ def test_cut_end_to_end(make_clip, tmp_path, capsys, monkeypatch):
     edl = json.loads((ws / "edl" / "coverage_9s.json").read_text(encoding="utf-8"))
     assert len(edl["clips"]) == 3  # 9 s at 3 s pacing: one clip per moment of the day
     assert (ws / "shots.json").is_file()
+    assert (ws / "edl" / "coverage_9s.violations.json").is_file()
 
     # second run: analysis comes from the caches, only planning runs again
     from vlogcut.analyze import quality, shots
@@ -81,6 +121,7 @@ def test_cut_end_to_end(make_clip, tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(shots, "detect_cuts", lambda *a, **k: pytest.fail("re-detected"))
     assert cli.main(["cut", str(day), "-t", "4", "-w", str(ws), "--no-render"]) == 0
     assert (ws / "edl" / "coverage_4s.json").is_file()
+    assert (ws / "edl" / "coverage_4s.violations.json").is_file()
     assert not (ws / "preview_coverage_4s.mp4").exists()
 
     # a style profile changes the pacing and gets its own output name; still no re-analysis
@@ -97,6 +138,7 @@ def test_cut_end_to_end(make_clip, tmp_path, capsys, monkeypatch):
     assert len(styled["clips"]) > len(plain["clips"])
     assert all(c["out_s"] - c["in_s"] <= 1.5 + 1e-6 for c in styled["clips"])
     assert "style fast.json" in styled["notes"]
+    assert (ws / "edl" / "coverage_4s_fast.violations.json").is_file()
 
 
 # ---------------------------------------------------------------------------

@@ -130,7 +130,12 @@ explainable, and it would break principle 2.
   and blind preference; its distinct value is the brief and narrative ordering.
 
 ### 5. Validate & repair
-- Deterministic post-processing first: snap cut points to the nearest beat within
+- Checks now run after planning in `pipeline.cut`, using the analyzed shots, requested
+  target duration and style profile (or `None` without `--style`). Every run writes
+  a JSON list to `edl/<stem>.violations.json`, replacing any previous report even
+  when empty. The CLI reports the results; violations are non-fatal and rendering
+  continues. Check coverage and current limits are recorded under 2026-10-26 below.
+- Planned deterministic post-processing first: snap cut points to the nearest beat within
   tolerance (needs the chosen music, so it runs after planning and before the checks),
   audio fades, subtitle timing from ASR
 - Hard checks (code): shot ids exist; in/out inside shot bounds; no rejected shots;
@@ -139,8 +144,9 @@ explainable, and it would break principle 2.
   order, except an optional cold open of at most `StyleProfile.cold_open_clips` clips
   at the start (a hook from later in the day, then back to the beginning); transition
   types and audio modes allowed by the profile
-- On failure: structured error list goes back to the planner (max N rounds), then a
-  rule-based fallback fix
+- Planned repair on failure: structured error list goes back to the planner (max N
+  rounds), then a rule-based fallback fix. Repair, fallback fixes and beat snapping
+  remain planned.
 
 ### 6. Render / export
 - Preview mp4 (`render/preview.py`): FFmpeg on proxies (fast, low-res); cached clip
@@ -289,6 +295,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · validate: checks run on every planned EDL, reported by the CLI (pipeline.py, cli.py)
 - [x] Week 4 · validate: deterministic hard checks (validate/checks.py)
 - [x] Week 3 · cut-point candidates: audio pauses → Shot.cut_points → rules planner placement (analyze/pauses.py, plan/rules.py)
 - [x] Week 1 · ingest: ffprobe metadata → `MediaAsset` (`ingest/probe.py`)
@@ -452,8 +459,9 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   64×64 float32 (≈ 440 MB for a 30 min reference), fine for 5–15 min PoC references;
   intro length, structure, transitions and look are not measured yet.
 - 2026-10-14: `cut --style <profile.json>` — the profile is read and validated before
-  any analysis, so a bad file fails in milliseconds, not after minutes of proxies; only
-  the rules planner reads it (pacing p10 / median / p90). Outputs carry the profile's
+  any analysis, so a bad file fails in milliseconds, not after minutes of proxies;
+  the rules planner reads it (pacing p10 / median / p90), and validation now uses it
+  after planning (2026-10-27). Outputs carry the profile's
   file stem as a suffix (`edl/coverage_180s_fast.json`, `preview_coverage_180s_fast.mp4`)
   so cuts with and without a style sit side by side in one workspace until the run
   manifest replaces name-based outputs. The EDL `notes` record the profile summary, so
@@ -630,10 +638,20 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   exists and is checked; cold opens remain unsupported until
   `StyleProfile.cold_open_clips` exists. No audio check until a profile dimension
   exists. `Violation`, like `StyleDistance`, is an analysis result outside
-  `schemas.py`. This pure module is not wired into the pipeline or CLI; repair,
-  fallback fixes and beat snapping remain planned. The rules planner can still
+  `schemas.py`. Checks now run after planning in `pipeline.cut`, writing
+  `edl/<stem>.violations.json`; the CLI reports them and violations are non-fatal.
+  Repair, fallback fixes and beat snapping remain planned. The rules planner can still
   miss the requested target when footage is insufficient and does not deduplicate;
   validation reports those cases without relaxing the checks.
+
+- 2026-10-27: validate pipeline wiring — every EDL planned by `pipeline.cut` is
+  checked with the analyzed shots, requested target and optional style profile.
+  `validate_and_write` replaces `edl/<stem>.violations.json` via a temporary file,
+  including an empty list on success, and logs each violation (or an OK info line).
+  `CutResult.violations` exposes the results; the CLI prints a summary and each
+  violation's clip index when present, code and message. Violations are non-fatal:
+  rendering continues and a successful cut still exits 0. Repair, fallback fixes
+  and beat snapping remain planned.
 
 ## Open questions
 
