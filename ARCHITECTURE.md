@@ -83,8 +83,8 @@ ingest → analyze → plan → validate/repair → render/export → feedback
   length fitting and rounding. Beats of the chosen music, motion minima and LLM
   planner use remain planned
 - Output: `Shot` records, cached in `workspace/<project>/`. Per-asset work is
-  independent; `pipeline.py` runs it sequentially today, a thread pool is the easy
-  speed-up
+  independent; `pipeline.py` can run it in a thread pool via `workers` / `--jobs`
+  (default 1, sequential).
 
 ### 3. Style profile (from references)
 Run shot detection, transitions, VAD and (later) captions on reference videos (quality
@@ -317,6 +317,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · pipeline: optional thread pool for per-asset analysis (pipeline.py, cli.py)
 - [x] Week 4 · plan: opt-in LLM planner wired into pipeline.cut and CLI (pipeline.py, cli.py)
 - [x] Week 4 · plan: LLM repair loop feeding violations back to the planner (plan/llm.py)
 - [x] Week 4 · plan: LLM planner core, prompt + EDL parsing via ModelRouter (plan/llm.py)
@@ -827,6 +828,20 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   config fails before analysis with a one-line error and exit 1. A planner/rounds/
   fallback summary line is printed; other exit codes and rules output bytes are
   unchanged. No prompt, parser, check, repair or schema changes; rules remain default.
+
+- 2026-11-07: optional per-asset thread pool — `pipeline.ingest`, `analyze` and
+  `cut` accept keyword-only `workers=1`; `vlogcut cut --jobs N` forwards the count.
+  The default retains sequential execution; counts below 1 fail before work starts
+  (CLI: one-line error, exit 1). Higher counts use a context-managed
+  `ThreadPoolExecutor` for probing/proxies and shot/quality/pause analysis. Results
+  and skipped-file warnings retain input order, regardless of completion order;
+  planning, validation and rendering stay sequential. Fatal errors propagate in
+  input order, pending futures are cancelled where possible, and running work is
+  joined before returning. Progress callbacks may run on workers; CLI writes are
+  locked. Per-call locks protect shared proxy, keyframe, shot, quality and pause
+  cache paths when duplicate content has the same asset ID. Cache formats and keys
+  are unchanged; shots, EDL, violations JSON and cache outputs are identical
+  regardless of worker count. No schema change or new dependency.
 
 ## Open questions
 

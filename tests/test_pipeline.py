@@ -1,12 +1,17 @@
 import json
 import logging
 from pathlib import Path
+from threading import Event, Lock
+from time import sleep
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from vlogcut import pipeline
+from vlogcut.analyze import pauses, quality
+from vlogcut.analyze import shots as shot_module
+from vlogcut.ingest import ProbeError
 from vlogcut.llm.router import ModelRouter
 from vlogcut.schemas import (
     EDL,
@@ -67,6 +72,196 @@ def _edl(shot_id: str = "s") -> EDL:
         variant_id="test", target_duration_s=1,
         clips=[Clip(shot_id=shot_id, in_s=0, out_s=1)],
     )  # fmt: skip
+
+
+def _assets() -> list[MediaAsset]:
+    return [
+        MediaAsset(
+            asset_id=str(i), path=f"{i}.mp4", proxy_path=f"{i}.mp4",
+            duration_s=10, fps=30, width=320, height=240,
+        )
+        for i in range(3)
+    ]  # fmt: skip
+
+
+def test_parallel_analysis_preserves_outputs_and_caches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assets = _assets()
+    monkeypatch.setattr(pipeline, "find_footage", lambda folder: [Path(a.path) for a in assets])
+    monkeypatch.setattr(pipeline, "probe_asset", lambda path: assets[int(path.stem)])
+    monkeypatch.setattr(pipeline, "make_proxy", lambda asset, workspace: asset)
+    monkeypatch.setattr(shot_module, "detect_cuts", lambda *a, **k: [5.0])
+    monkeypatch.setattr(shot_module, "extract_keyframes", lambda *a: [])
+    monkeypatch.setattr(
+        "vlogcut.analyze.detect_shots",
+        lambda asset, workspace: shot_module.detect_shots(
+            asset, workspace, shot_module.ShotParams(dissolves=False)
+        ),
+    )
+    monkeypatch.setattr(quality, "measure_shot", lambda *a: None)
+    monkeypatch.setattr(quality, "assess", lambda *a: _shots()[0].quality)
+    monkeypatch.setattr(pauses, "detect_pauses", lambda *a: [pauses.Pause(1, 2)])
+    analyze_pauses = pauses.analyze_pauses
+    completed: list[str] = []
+    finished = [Event() for _ in assets]
+    parallel = False
+
+    def ordered_pauses(asset: MediaAsset, workspace: Path) -> list[pauses.Pause]:
+        i = int(asset.asset_id)
+        if parallel and i < 2:
+            assert finished[i + 1].wait(5), "assets did not run concurrently"
+        result = analyze_pauses(asset, workspace)
+        completed.append(asset.asset_id)
+        finished[i].set()
+        return result
+
+    monkeypatch.setattr(pauses, "analyze_pauses", ordered_pauses)
+    with monkeypatch.context() as sequential:
+        sequential.setattr(
+            pipeline, "ThreadPoolExecutor", lambda **kwargs: pytest.fail("started pool")
+        )
+        baseline = pipeline.cut(tmp_path, tmp_path, target_s=9, render=False, workers=1)
+    assert completed == ["0", "1", "2"]
+    expected = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*.json")}
+    assert len(expected) == 12  # shot, quality, pause caches plus shots, EDL and violations
+    for path in expected:
+        (tmp_path / path).unlink()
+    completed.clear()
+    for event in finished:
+        event.clear()
+    parallel = True
+    result = pipeline.cut(tmp_path, tmp_path, target_s=9, render=False, workers=3)
+    assert completed == ["2", "1", "0"]
+    assert result.shots == baseline.shots
+    assert result.edl == baseline.edl and result.violations == baseline.violations
+    assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*.json")} == expected
+    assert not list(tmp_path.rglob("*.part"))
+    assert pipeline.analyze(assets, tmp_path, workers=3) == baseline.shots  # cache hits
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+@pytest.mark.parametrize("stage", ["probe", "proxy", "shots", "quality", "pauses"])
+def test_asset_failure_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int, stage: str
+) -> None:
+    assets = _assets()
+    error = RuntimeError("asset failed")
+
+    def fail(item: Path | MediaAsset, *args: object) -> MediaAsset | list[Shot]:
+        asset_id = item.stem if isinstance(item, Path) else item.asset_id
+        if asset_id == "1":
+            raise error
+        return assets[int(asset_id)] if stage in {"probe", "proxy"} else []
+
+    monkeypatch.setattr(pipeline, "probe_asset", lambda path: assets[int(path.stem)])
+    monkeypatch.setattr(pipeline, "make_proxy", lambda asset, workspace: asset)
+    monkeypatch.setattr("vlogcut.analyze.detect_shots", lambda *a: [])
+    monkeypatch.setattr("vlogcut.analyze.assess_shots", lambda *a: [])
+    monkeypatch.setattr(pauses, "analyze_pauses", lambda *a: [])
+    target = {
+        "probe": "vlogcut.pipeline.probe_asset",
+        "proxy": "vlogcut.pipeline.make_proxy",
+        "shots": "vlogcut.analyze.detect_shots",
+        "quality": "vlogcut.analyze.assess_shots",
+        "pauses": "vlogcut.analyze.pauses.analyze_pauses",
+    }[stage]
+    monkeypatch.setattr(target, fail)
+    with pytest.raises(RuntimeError) as raised:
+        if stage in {"probe", "proxy"}:
+            pipeline.ingest([Path(a.path) for a in assets], tmp_path, workers=workers)
+        else:
+            pipeline.analyze(assets, tmp_path, workers=workers)
+    assert raised.value is error
+
+
+@pytest.mark.parametrize("stage", ["probe", "proxy"])
+def test_parallel_ingest_preserves_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    assets = _assets()
+    finished = [Event() for _ in assets]
+    completed: list[str] = []
+
+    def finish(item: Path | MediaAsset, *args: object) -> MediaAsset:
+        i = int(item.stem if isinstance(item, Path) else item.asset_id)
+        if i < 2:
+            assert finished[i + 1].wait(5), "ingest did not run concurrently"
+        completed.append(str(i))
+        finished[i].set()
+        return assets[i]
+
+    monkeypatch.setattr(pipeline, "probe_asset", lambda path: assets[int(path.stem)])
+    monkeypatch.setattr(pipeline, "make_proxy", lambda asset, workspace: asset)
+    monkeypatch.setattr(pipeline, "probe_asset" if stage == "probe" else "make_proxy", finish)
+    result = pipeline.ingest([Path(a.path) for a in assets], tmp_path, workers=3)
+    assert completed == ["2", "1", "0"]
+    assert result == (assets, [])
+
+
+@pytest.mark.parametrize("workers", [0, -1])
+def test_invalid_workers_fail_before_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int
+) -> None:
+    def unexpected(*args: object) -> None:
+        pytest.fail("started work")
+
+    monkeypatch.setattr(pipeline, "find_footage", unexpected)
+    for call in (
+        lambda: pipeline.cut(tmp_path, tmp_path, workers=workers),
+        lambda: pipeline.ingest([Path("0.mp4")], tmp_path, unexpected, workers=workers),
+        lambda: pipeline.analyze(_assets(), tmp_path, unexpected, workers=workers),
+    ):
+        with pytest.raises(ValueError, match="workers must be at least 1"):
+            call()
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_ingest_skip_reports_keep_input_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, workers: int
+) -> None:
+    assets = _assets()
+
+    def probe(path: Path) -> MediaAsset:
+        i = int(path.stem)
+        sleep(0.02 * (2 - i))
+        if i != 1:
+            raise ProbeError(f"bad {i}")
+        return assets[i]
+
+    monkeypatch.setattr(pipeline, "probe_asset", probe)
+    monkeypatch.setattr(pipeline, "make_proxy", lambda asset, workspace: asset)
+    found, skipped = pipeline.ingest([Path(a.path) for a in assets], tmp_path, workers=workers)
+    assert found == [assets[1]]
+    assert skipped == [("0.mp4", "bad 0"), ("2.mp4", "bad 2")]
+    assert [r.message for r in caplog.records] == ["skipping 0.mp4: bad 0", "skipping 2.mp4: bad 2"]
+
+
+@pytest.mark.parametrize("stage", ["ingest", "analyze"])
+def test_duplicate_ids_do_not_write_caches_concurrently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    asset = _assets()[0]
+    active = Lock()
+
+    def write(*args: object) -> MediaAsset | list[Shot]:
+        assert active.acquire(blocking=False), "concurrent writes to the same asset cache"
+        try:
+            sleep(0.02)
+            return asset if stage == "ingest" else []
+        finally:
+            active.release()
+
+    monkeypatch.setattr(pipeline, "probe_asset", lambda path: asset)
+    monkeypatch.setattr(pipeline, "make_proxy", write)
+    monkeypatch.setattr("vlogcut.analyze.detect_shots", write)
+    monkeypatch.setattr("vlogcut.analyze.assess_shots", lambda *a: [])
+    monkeypatch.setattr(pauses, "analyze_pauses", lambda *a: [])
+    if stage == "ingest":
+        assert pipeline.ingest([Path(asset.path)] * 3, tmp_path, workers=3) == ([asset] * 3, [])
+    else:
+        assert pipeline.analyze([asset] * 3, tmp_path, workers=3) == []
 
 
 def test_validate_and_write_valid(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:

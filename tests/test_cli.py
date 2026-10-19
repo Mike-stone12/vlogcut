@@ -25,8 +25,33 @@ def test_parser_defaults():
     assert (args.target, args.strategy, args.background) == (180.0, "coverage", "black")
     assert not args.no_subtitles and not args.no_render
     assert args.style is None and args.music is None
+    assert args.jobs == 1
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["cut", "day1", "--strategy", "random"])
+
+
+@pytest.mark.parametrize("jobs", [0, -1])
+def test_invalid_jobs_fail_before_cut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, jobs: int
+) -> None:
+    monkeypatch.setattr("vlogcut.pipeline.cut", lambda *a, **k: pytest.fail("started cut"))
+    assert cli.main(["cut", str(tmp_path), "--jobs", str(jobs)]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "vlogcut: error: --jobs must be at least 1\n"
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_jobs_forwarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, jobs: int) -> None:
+    def cut(*args: object, **kwargs: object) -> CutResult:
+        assert kwargs["workers"] == jobs
+        return _cut_result(tmp_path, [])
+
+    monkeypatch.setattr("vlogcut.pipeline.cut", cut)
+    argv = ["cut", str(tmp_path), "--no-render"]
+    if jobs != 1:
+        argv += ["--jobs", str(jobs)]
+    assert cli.main(argv) == 0
 
 
 def test_cli_errors_are_one_line_and_exit_1(tmp_path, capsys):

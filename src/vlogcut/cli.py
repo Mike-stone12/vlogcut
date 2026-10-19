@@ -12,6 +12,7 @@ import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from threading import Lock
 
 from vlogcut import __version__
 
@@ -43,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--background", choices=["black", "blur"], default="black")
     c.add_argument("--no-subtitles", action="store_true", help="no debug subtitle track")
     c.add_argument("--no-render", action="store_true", help="plan only, write the EDL")
+    c.add_argument("--jobs", type=int, default=1, help="per-asset analysis workers (default 1)")
     c.add_argument("-v", "--verbose", action="store_true")
 
     s = sub.add_parser("style", help="style profiles: build from references, show, diff")
@@ -79,6 +81,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _cut(args: argparse.Namespace) -> int:
+    if args.jobs < 1:
+        return _fail("--jobs must be at least 1")
     from vlogcut.analyze.shots import ShotDetectionError
     from vlogcut.ingest import FFmpegError, FFmpegNotFoundError, ProxyError
     from vlogcut.pipeline import cut
@@ -113,6 +117,12 @@ def _cut(args: argparse.Namespace) -> int:
             return _fail(f"invalid model config {args.config}: {detail}")
     workspace = args.workspace or Path("workspace") / args.folder.resolve().name
     started = time.perf_counter()
+    progress_lock = Lock()
+
+    def progress(msg: str) -> None:
+        with progress_lock:
+            print(msg, file=sys.stderr)
+
     try:
         result = cut(
             args.folder, workspace,
@@ -120,7 +130,7 @@ def _cut(args: argparse.Namespace) -> int:
             planner=args.planner, router=router, brief=args.brief,
             music_gain_db=args.music_gain, out=args.out, render=not args.no_render,
             preview_params={"background": args.background, "subtitles": not args.no_subtitles},
-            progress=lambda msg: print(msg, file=sys.stderr),
+            progress=progress, workers=args.jobs,
         )  # fmt: skip
     except FFmpegNotFoundError as exc:
         return _fail(str(exc))
