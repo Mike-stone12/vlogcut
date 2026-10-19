@@ -203,6 +203,8 @@ explainable, and it would break principle 2.
   "the café part was too short" is about this edit and becomes a re-plan constraint;
   "too fast overall" is about style and becomes a validated `StyleProfile` delta.
   Mixing the two would drift the profile.
+  Classification exists in `feedback/classify.py`, with pure profile-delta application,
+  but is not wired into the pipeline or CLI.
 - Every (context, variant A, variant B, choice) is logged as a preference pair and
   feeds the ranker (§3b)
 
@@ -368,6 +370,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 5 · feedback: feedback-role classification into edit constraints / profile deltas (feedback/classify.py)
 - [x] Week 3 · structure: rules planner honours intro_pace_ratio (plan/rules.py)
 - [x] Week 5 · feedback: CLI page + pairs subcommands (cli.py)
 - [x] Week 5 · feedback: static variants page + feedback JSON loader (feedback/page.py)
@@ -1007,6 +1010,19 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   bypasses scaling and preserves EDL JSON bytes. Selection, duplicate avoidance,
   placement, transition assignment and clip audio rules are unchanged. No schema
   change, burst/cold-open generation, LLM prompt change or intro-pace validation.
+
+- 2026-10-18: feedback classification — `feedback/classify.py` defines analysis-result
+  models `FeedbackClassification` (exclusive edit constraint or style delta) and
+  `ProfileDelta` (at least one of duration multiplier `pace_factor`, inclusive
+  [0.25, 4.0], or absolute `dissolve_share`, inclusive [0, 1]). Deterministic messages
+  include verdict, text and optional profile pacing/transition measurements. Blank
+  text raises before calling; otherwise exactly one `ModelRouter.complete("feedback", ...)`
+  call is made, with no retries. JSON parsing accepts surrounding Markdown/JSON fences;
+  invalid JSON or validation failures raise a one-line `FeedbackClassificationError`.
+  Pure application returns a newly validated profile: multiply p10/median/p90,
+  divide cuts per minute, and set hard-cut/dissolve shares to 1-s/s when supplied.
+  Preserve all other fields and append a deterministic note without mutating inputs.
+  No schema change, pipeline/CLI wiring, re-planning, persistence or ranker work.
 
 ## Open questions
 
