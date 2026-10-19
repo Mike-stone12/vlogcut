@@ -289,6 +289,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · validate: deterministic hard checks (validate/checks.py)
 - [x] Week 3 · cut-point candidates: audio pauses → Shot.cut_points → rules planner placement (analyze/pauses.py, plan/rules.py)
 - [x] Week 1 · ingest: ffprobe metadata → `MediaAsset` (`ingest/probe.py`)
 - [x] Week 1 · ingest: low-res proxies, cached per asset (`ingest/proxy.py`)
@@ -610,6 +611,29 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   Transitions are assigned from the original rounded lengths before placement, so
   their kinds and durations remain identical. Beats, motion minima and LLM planner
   placement remain planned.
+
+- 2026-10-26: validate hard checks — `validate/checks.py` returns ordered `Violation`
+  records for unknown shot IDs, shot-relative in/out bounds (1e-6 s tolerance),
+  rejected shots, target timeline duration (default ±10%), profile clip timeline
+  durations (p10 minus 25% through p90 plus 25%), adjacent non-None `dup_group`
+  matches, strict chronology in the supplied shot order (including repeated shots),
+  dissolves forbidden by a measured zero dissolve share, and oversized dissolves.
+  Each dissolve must be no longer than either neighbouring timeline clip; incoming
+  and outgoing half-windows must not overlap within a clip. Speed affects timeline
+  durations; dissolves do not shorten the total. Boundary errors belong to the
+  incoming clip, overlap errors to the affected clip; EDL-level errors come last.
+  Unknown IDs receive only `unknown_shot`; chronology compares successive known
+  shots across unknown IDs, while duplicate groups compare actual neighbours only.
+  `target_s=None` skips the target check, even when the EDL declares a target;
+  `profile=None` skips pacing and transition-mix checks. Unmeasured mixes allow
+  dissolves. `usable_range` is a suggestion and is not enforced. `Shot.dup_group`
+  exists and is checked; cold opens remain unsupported until
+  `StyleProfile.cold_open_clips` exists. No audio check until a profile dimension
+  exists. `Violation`, like `StyleDistance`, is an analysis result outside
+  `schemas.py`. This pure module is not wired into the pipeline or CLI; repair,
+  fallback fixes and beat snapping remain planned. The rules planner can still
+  miss the requested target when footage is insufficient and does not deduplicate;
+  validation reports those cases without relaxing the checks.
 
 ## Open questions
 
