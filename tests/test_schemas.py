@@ -219,6 +219,27 @@ def test_structure_stats_rejects_invalid_share(share: float) -> None:
         StructureStats(montage_share=share)
 
 
+def test_old_structure_json_has_unmeasured_intro_pace() -> None:
+    profile = StyleProfile.model_validate_json(
+        '{"shot_duration_s": {"p10": 1, "median": 2, "p90": 4}, '
+        '"cuts_per_min": 20, "structure": {"montage_share": 0.5}}'
+    )
+    assert profile.structure is not None
+    assert profile.structure.intro_pace_ratio is None
+
+
+@pytest.mark.parametrize("ratio", [0, -0.5])
+def test_structure_rejects_non_positive_intro_pace(ratio: float) -> None:
+    with pytest.raises(ValidationError, match="intro_pace_ratio"):
+        StructureStats(montage_share=0, intro_pace_ratio=ratio)
+
+
+@pytest.mark.parametrize("ratio", [None, 0.5, 1, 2])
+def test_structure_intro_pace_round_trip(ratio: float | None) -> None:
+    structure = StructureStats(montage_share=0.5, intro_pace_ratio=ratio)
+    assert StructureStats.model_validate_json(structure.model_dump_json()) == structure
+
+
 @pytest.mark.parametrize("share", [0, 0.375, 1])
 def test_style_structure_round_trip(share: float) -> None:
     profile = StyleProfile(

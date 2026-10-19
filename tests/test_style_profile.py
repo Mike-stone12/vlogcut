@@ -19,6 +19,7 @@ from vlogcut.style.profile import (
     analyze_reference,
     combine_cuts,
     duration_stats,
+    intro_pace_ratio,
     montage_share,
     pooled_beat_ratio,
     shot_durations,
@@ -77,6 +78,34 @@ def test_montage_share_rejects_invalid_args(median_s: float, rel: float, min_run
 def test_montage_share_custom_threshold_and_minimum_run() -> None:
     assert montage_share([[0.5, 0.5, 2]], median_s=2, rel=0.3, min_run=2) == 2 / 3
     assert montage_share([[0.5, 0.5, 2]], median_s=2, rel=0.25, min_run=2) == 0
+
+
+@pytest.mark.parametrize(
+    ("sequences", "expected"),
+    [
+        ([[4, 6, 12, 8, 16]], 0.5),  # crossing shot stays whole: median(4,6,12) / 12
+        ([[10, 10, 4, 6]], 2.0),  # shot starting exactly at 20 s belongs to the body
+        ([[5, 15, 2], [20, 8]], 3.0),  # pooled median(5,15,20) / median(2,8)
+        ([[5, 15, 2, 4], [2, 2, 2, 2, 12, 8, 12]], 1 / 3),  # pool shots, not ratios
+        ([[20, 4, 6]], None),  # only one intro shot
+        ([[10, 10, 4]], None),  # only one body shot
+        ([[4, 6]], None),  # no body
+        ([], None),
+        ([[], []], None),
+    ],
+)
+def test_intro_pace_ratio(sequences: list[list[float]], expected: float | None) -> None:
+    assert intro_pace_ratio(sequences) == pytest.approx(expected)
+
+
+def test_intro_pace_ratio_custom_window() -> None:
+    assert intro_pace_ratio([[2, 3, 8, 12]], intro_s=5) == 0.25
+
+
+@pytest.mark.parametrize("intro_s", [0, -1])
+def test_intro_pace_ratio_rejects_non_positive_window(intro_s: float) -> None:
+    with pytest.raises(ValueError, match="intro_s"):
+        intro_pace_ratio([], intro_s=intro_s)
 
 
 def _ref(
@@ -143,6 +172,17 @@ def test_aggregate_pools_shots_and_rates_by_total_time():
     assert profile.source_refs == ["a.mp4", "b.mp4"]
     assert profile.beat_aligned_ratio is None and profile.speech_ratio is None
     assert "2 references" in profile.notes and "4.0 cuts/min" in profile.notes
+
+
+def test_aggregate_intro_pace_uses_ordered_post_merge_durations() -> None:
+    # The sliver merges left: [4.1, 5.9, 12, 8, 16], so intro/body medians are 5.9/12.
+    profile = aggregate([_ref("a", 46, [4, 4.1, 10, 22, 30])], ReferenceParams())
+    assert profile.structure is not None
+    assert profile.structure.intro_pace_ratio == pytest.approx(5.9 / 12)
+    assert profile.notes == (
+        "1 reference, 0.8 min, 4 cuts; median shot 8.0 s "
+        "(p10 4.8, p90 14.4); 5.2 cuts/min; 0.0% dissolves"
+    )
 
 
 def test_aggregate_without_references_raises():

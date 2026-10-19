@@ -89,16 +89,20 @@ ingest → analyze → plan → validate/repair → render/export → feedback
 ### 3. Style profile (from references)
 Run shot detection, transitions, VAD and (later) captions on reference videos (quality
 flags are skipped: references are finished edits), then aggregate:
-- Pacing: shot-duration p10/median/p90, cuts per minute, pacing curve (intro vs body)
+- Pacing: shot-duration p10/median/p90, cuts per minute; intro-vs-body median ratio
+  is measured under structure; a full pacing curve remains planned
 - Music: beat-aligned cut ratio (cut within ±80 ms of a beat in the reference's own
   audio), pooled over references with detected beats via `analyze/beats.py`.
   Profile BPM, energy curve and chosen-music integration remain planned
 - Structure ("grammar"): montage bursts are now measured as the share of shots in
   runs of at least three shots shorter than half the pooled median, within each
-  reference. Intro length, speech ratio, talking ↔ b-roll alternation (transition
+  reference. Intro-vs-body pacing is the pooled median duration of shots starting
+  before 20 s divided by the pooled body median (at least two shots in each pool).
+  Intro length, speech ratio, talking ↔ b-roll alternation (transition
   counts between shot kinds), and cold-open measurement remain planned. Pacing alone
   reads as a speed slider; structure is what makes a cut recognisably someone's.
-  Cold-open allowance is user-set. Planners do not yet produce bursts or cold opens.
+  Cold-open allowance is user-set. Planners do not yet use the intro pacing ratio
+  or produce bursts or cold opens.
 - Transitions: share of hard cuts / dissolves (from `analyze/transitions.py`); fades
   through black currently count as two dissolves
 - Audio: speech-over-music ratio, whether clip audio is kept under music
@@ -242,8 +246,8 @@ until its analysis is wired in: `None` means "not measured", which is not the sa
 JSON without this field still loads. The mix is unmeasured when dissolve detection is off
 or no cuts survive merging. Profiles still require at least one cut to describe pacing.
 
-`StyleProfile.structure: StructureStats | None = None` holds the first measured
-structure dimension, `StructureStats.montage_share`, a share in [0, 1]. A burst is a
+`StyleProfile.structure: StructureStats | None = None` holds measured structure
+dimensions. `StructureStats.montage_share` is a share in [0, 1]. A burst is a
 maximal run of at least three consecutive shots strictly shorter than half the pooled
 profile median. Runs stay within each reference's timeline-ordered, post-merge shot
 durations; the share pools shots inside bursts / total shots, not per-reference ratios.
@@ -251,6 +255,13 @@ EDLs use speed-adjusted clip timeline durations in clip order as one sequence.
 `None` means not measured, distinct from a measured zero; old profile JSON without
 `structure` still loads with `None`. The pure helper returns `None` for zero shots;
 profile construction retains its existing pacing errors for insufficient cuts.
+`StructureStats.intro_pace_ratio: float | None = None` is strictly positive when
+measured: pooled median intro shot duration / pooled median body shot duration.
+Each reference restarts at zero; whole shots starting strictly before 20 s belong
+to the intro, all others to the body. Pool durations, not per-reference ratios,
+using the same ordered, post-merge durations (speed-adjusted clips for EDLs).
+Fewer than two shots in either pool yields `None`, meaning not measured. Old JSON
+with structure but without this field loads with `None`. Planners do not yet use it.
 
 `StyleProfile.cold_open_clips` is a non-negative, user-set integer defaulting to 0
 (no cold open), including when absent from old profile JSON. It exempts the first
@@ -279,7 +290,7 @@ Planned additions (remaining fields land with the module that needs them):
 |---|---|
 | `MusicCue.end_s`, ducking params | music mixing needs an end and a level under speech |
 | `Shot.kind` (talking / broll) | structure dimension |
-| `StyleProfile.structure` | exists with `montage_share`; talking/b-roll alternation, intro length and cold-open measurement remain planned |
+| `StyleProfile.structure` | exists with `montage_share` and `intro_pace_ratio`; talking/b-roll alternation, intro length and cold-open measurement remain planned |
 | `Run` manifest (inputs fingerprint → outputs) | EDL file names collide once profile version, brief, variant and model all vary |
 
 Cached JSON should store paths relative to the workspace so a moved workspace stays
@@ -383,6 +394,7 @@ unrelated footage in a way viewers recognise. Protocol:
 - [x] Week 2 · rules planner reproduces the profile's shot-length distribution
 - [x] Week 3 · structure: StyleProfile.cold_open_clips honoured by chronology check (schemas.py, validate/checks.py)
 - [x] Week 3 · structure: montage-burst share from references and EDLs (schemas.py, style/profile.py, style/distance.py)
+- [x] Week 3 · structure: intro-vs-body pacing ratio from references and EDLs (schemas.py, style/profile.py, style/distance.py)
 - [x] Week 3 · style: transition mix from references (`style/profile.py`)
 - [x] Week 3 · style: beat-aligned cut ratio from references (style/profile.py)
 
@@ -397,7 +409,8 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   within a third of the distance between the two references. The fast-reference EDL
   distance must also be < 0.1 octaves; the rendered-preview distance must be < 0.2.
 - Style distance (`style/distance.py`): per dimension |log2(a / b)| for the positive
-  pacing quantities (shot-duration p10 / median / p90, cuts per minute), so the unit is
+  pacing quantities (shot-duration p10 / median / p90, cuts per minute, and
+  `intro_pace` from `structure.intro_pace_ratio`), so the unit is
   octaves (1.0 = twice as fast or slow); absolute difference for the ratio dimensions in
   [0, 1]: `beat_aligned_ratio`, `speech_ratio`, `dissolve` (`transitions.dissolve`),
   and `montage_share` (`structure.montage_share`);
@@ -960,6 +973,20 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   keys/formats and `ReferenceParams` are unchanged, as are notes and summary text.
   Planners do not produce bursts; validation and repair are unchanged. Talking/b-roll
   alternation, intro length and cold-open measurement remain planned.
+
+- 2026-10-18: intro-vs-body pacing — **schema change**:
+  `StructureStats.intro_pace_ratio: float | None = None`, strictly positive when set,
+  is median(intro durations) / median(body durations). Each timeline starts at zero;
+  a whole shot belongs to the intro when its start is strictly before the 20 s window
+  ends, otherwise to the body. Require at least two pooled shots on each side;
+  otherwise `None` means not measured, including old structure JSON without the field.
+  Pool durations across references rather than averaging per-reference ratios, using
+  the same timeline-ordered, post-merge durations as pacing and montage share. EDLs
+  use speed-adjusted clip durations in clip order as one sequence. The pure helper
+  accepts a positive `intro_s` override, defaulting to 20 s. Style distance adds
+  equally weighted `intro_pace = |log2(a / b)|` in octaves, skipped and reported when
+  either side is unmeasured. Reference caches, detection parameters and notes are
+  unchanged. Planners do not yet use the value.
 
 ## Open questions
 

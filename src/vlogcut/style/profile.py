@@ -1,7 +1,7 @@
 """Style profile from reference videos: pacing, structure, transitions and beats.
 
 PoC slice: the shot-duration distribution (p10 / median / p90) and cuts per minute,
-pooled over all references, plus montage-burst share, transition mix and beat alignment.
+pooled over all references, plus montage-burst share, intro/body pacing, transitions and beats.
 Other structure dimensions and speech come later.
 
 References are finished edits, so this does not reuse `analyze.detect_shots`: that step
@@ -27,6 +27,7 @@ from vlogcut.schemas import DurationStats, StructureStats, StyleProfile, Transit
 log = logging.getLogger(__name__)
 
 Progress = Callable[[str], None]
+INTRO_S = 20.0
 
 
 class ReferenceParams(BaseModel):
@@ -115,6 +116,30 @@ def montage_share(
     return in_bursts / total if total else None
 
 
+def intro_pace_ratio(
+    sequences: Sequence[Sequence[float]], intro_s: float = INTRO_S
+) -> float | None:
+    """Ratio of pooled intro/body medians, assigning whole shots by their start time.
+
+    Each timeline starts at zero; each pool needs at least two shots to be measured.
+    """
+    if intro_s <= 0:
+        raise ValueError("intro_s must be positive")
+    intro: list[float] = []
+    body: list[float] = []
+    for durations in sequences:
+        start = 0.0
+        for duration in durations:
+            if start < intro_s:
+                intro.append(duration)
+            else:
+                body.append(duration)
+            start += duration
+    if len(intro) < 2 or len(body) < 2:
+        return None
+    return statistics.median(intro) / statistics.median(body)
+
+
 def duration_stats(durations: Sequence[float]) -> DurationStats:
     if len(durations) < 2:
         raise StyleError("need at least two shots (one cut) to describe pacing")
@@ -190,7 +215,11 @@ def profile_from_durations(
         shot_duration_s=stats,
         cuts_per_min=cuts_per_min,
         transitions=mix,
-        structure=StructureStats(montage_share=share) if share is not None else None,
+        structure=(
+            StructureStats(montage_share=share, intro_pace_ratio=intro_pace_ratio(per_ref))
+            if share is not None
+            else None
+        ),
         beat_aligned_ratio=beat_ratio,
         notes=notes,
     )
