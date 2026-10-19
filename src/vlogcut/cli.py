@@ -112,6 +112,8 @@ def _cut(args: argparse.Namespace) -> int:
         print(f"style     {args.style.name}: {result.profile.notes}")
     print(f"cut       {len(result.edl.clips)} clips, {result.edl.total_duration_s:.1f} s")
     print(f"edl       {result.edl_path}")
+    if result.repaired:
+        print("repaired EDL")
     print(
         f"validation: {len(result.violations)} issue(s)" if result.violations else "validation: OK"
     )

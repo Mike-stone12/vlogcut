@@ -63,13 +63,19 @@ def test_cut_reports_violations_without_failing(
     assert "clip None" not in out
 
 
+@pytest.mark.parametrize("repaired", [False, True])
 def test_cut_reports_validation_ok(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, repaired: bool
 ) -> None:
     result = _cut_result(tmp_path, [])
+    result.repaired = repaired
     monkeypatch.setattr("vlogcut.pipeline.cut", lambda *args, **kwargs: result)
     assert cli.main(["cut", str(tmp_path), "--no-render"]) == 0
-    assert "validation: OK\n" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "validation: OK\n" in out
+    assert out.count("repaired EDL\n") == int(repaired)
+    if repaired:
+        assert out.index("repaired EDL\n") < out.index("validation: OK\n")
 
 
 def _cut_result(tmp_path: Path, violations: list[Violation]) -> CutResult:
