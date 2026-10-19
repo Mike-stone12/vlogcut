@@ -5,16 +5,19 @@ from hashlib import sha256
 
 import pytest
 
+from vlogcut.analyze.kind import classify_kind
 from vlogcut.plan import RoughCutError, RoughCutParams, rough_cut, score_shot
 from vlogcut.plan.rules import (
     DEFAULT_PACING,
     _Candidate,
+    _estimated_speech_ratio,
     _lengths,
     _ranker_percentiles,
     apply_cold_open,
     apply_intro_pace,
     apply_kind_alternation,
     apply_montage,
+    apply_speech_ratio,
     assign_lengths,
     assign_transitions,
     avoid_adjacent_duplicates,
@@ -35,7 +38,7 @@ from vlogcut.schemas import (
     Transition,
     TransitionMix,
 )
-from vlogcut.style.distance import profile_from_edl
+from vlogcut.style.distance import profile_from_edl, speech_ratio
 from vlogcut.style.profile import duration_stats, kind_alternation, montage_share
 from vlogcut.validate.checks import validate_edl
 
@@ -325,6 +328,164 @@ def test_alternation_preserves_capacity_for_duration_fit() -> None:
     )
     assert shots[1].shot_id not in {c.shot_id for c in edl.clips}
     assert validate_edl(edl, shots, profile, target_s=13) == []
+
+
+@pytest.mark.parametrize("strategy", ["coverage", "highlights"])
+@pytest.mark.parametrize("with_profile", [False, True])
+def test_unmeasured_speech_ratio_preserves_legacy_bytes(
+    monkeypatch: pytest.MonkeyPatch, strategy: str, with_profile: bool
+) -> None:
+    shots, assets = _day(4)
+    shots[0].quality.warnings = ["kept_for_audio"]
+    params = RoughCutParams(target_s=24, strategy=strategy)
+    profile = (
+        StyleProfile(
+            shot_duration_s=DEFAULT_PACING,
+            cuts_per_min=20,
+            structure=StructureStats(montage_share=0, kind_alternation=0.5),
+        )
+        if with_profile
+        else None
+    )
+    actual = rough_cut(shots, assets, params, profile).model_dump_json().encode()
+    # Bypass the pass to reproduce the previous planner with the same inputs.
+    monkeypatch.setattr("vlogcut.plan.rules.apply_speech_ratio", lambda picked, *a, **kw: picked)
+    assert actual == rough_cut(shots, assets, params, profile).model_dump_json().encode()
+
+    def unexpected_swap(*args: object, **kwargs: object) -> list[_Candidate]:
+        pytest.fail("unmeasured speech ratio must bypass the pass")
+
+    monkeypatch.setattr("vlogcut.plan.rules.apply_speech_ratio", unexpected_swap)
+    if profile:
+        profile = profile.model_copy(update={"speech_ratio": None})
+    assert actual == rough_cut(shots, assets, params, profile).model_dump_json().encode()
+
+
+@pytest.mark.parametrize("strategy", ["coverage", "highlights"])
+@pytest.mark.parametrize("target", [0.0, 0.8])
+@pytest.mark.parametrize("alternation", [None, 0.0, 0.5, 1.0])
+def test_speech_ratio_moves_duration_share_and_preserves_invariants(
+    strategy: str, target: float, alternation: float | None
+) -> None:
+    shots = [_shot("a", i) for i in range(24)]
+    for i, shot in enumerate(shots):
+        # Select the opposite kind from the speech target before swaps.
+        if (i % 2 == 0) == (target == 0):
+            shot.quality.warnings = ["kept_for_audio"]
+        shot.dup_group = str(i // 2)
+    profile = StyleProfile(
+        shot_duration_s=DEFAULT_PACING,
+        cuts_per_min=20,
+        structure=StructureStats(montage_share=0, kind_alternation=alternation),
+    )
+    params = RoughCutParams(target_s=37.8, strategy=strategy)
+    assets = [_asset("a", 0)]
+
+    def score(shot: Shot) -> float:
+        return float(shots.index(shot) % 2 == 0)
+
+    plain = rough_cut(shots, assets, params, profile, score)
+    profile.speech_ratio = target
+    edl = rough_cut(shots, assets, params, profile, score)
+    kinds = {shot.shot_id: classify_kind(shot) for shot in shots}
+    before = speech_ratio(plain.clips, kinds)
+    after = speech_ratio(edl.clips, kinds)
+    assert before is not None and after is not None
+    if alternation is None:
+        assert abs(after - target) < abs(before - target)
+    else:
+        before_alt = kind_alternation([kinds[c.shot_id] for c in plain.clips])
+        after_alt = kind_alternation([kinds[c.shot_id] for c in edl.clips])
+        assert before_alt is not None and after_alt is not None
+        assert abs(after_alt - alternation) <= abs(before_alt - alternation)
+    assert len(edl.clips) == len(plain.clips)
+    assert [c.shot_id for c in edl.clips] == sorted(c.shot_id for c in edl.clips)
+    groups = [_by_id(shots)[c.shot_id].dup_group for c in edl.clips]
+    assert all(a != b for a, b in zip(groups, groups[1:], strict=False))
+    assert edl.total_duration_s == pytest.approx(params.target_s, rel=0.1)
+    assert validate_edl(edl, shots, profile, target_s=params.target_s) == []
+    assert (
+        edl.model_dump_json() == rough_cut(shots, assets, params, profile, score).model_dump_json()
+    )
+
+
+def test_speech_estimate_uses_caps_mean_and_known_kinds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("vlogcut.plan.rules.classify_kind", lambda shot: shot.kind)
+    cands = [_candidate(i, None) for i in range(4)]
+    for c, kind in zip(cands, ["talking", "broll", "broll", None], strict=True):
+        c.shot.kind = kind
+    cands[0].lo, cands[0].hi = 1, 5  # usable duration, not whole shot duration
+    cands[1].hi = 2
+    pace = DurationStats(p10=1, median=3, p90=5)
+    assert _estimated_speech_ratio(cands, pace) == pytest.approx(4 / (4 + 2 + 3))
+    assert _estimated_speech_ratio([cands[-1]], pace) is None
+    assert apply_speech_ratio([cands[-1]], cands, 0.8, pace) == [cands[-1]]
+    assert apply_speech_ratio([], cands, 0.8, pace) == []
+
+
+@pytest.mark.parametrize("ranked,expected", [(False, 1), (True, 3)])
+def test_speech_swaps_use_blended_scores_and_eligible_pool(ranked: bool, expected: int) -> None:
+    shots = [_shot("a", i) for i in range(8)]
+    for i, shot in enumerate(shots):
+        shot.kind = "talking" if i in (0, 2, 4) else "broll"
+    shots[5].quality.rejected = True
+    shots[6].quality.usable_range = (0, 0.5)
+    shots[7].end_s = shots[7].start_s + 0.5
+    scores = dict(zip((s.shot_id for s in shots), [1, 0.3, 1, 0.2, 1, 0.9, 0.9, 0.9], strict=True))
+    ranks = {s.shot_id: r for s, r in zip(shots, [5, 0, 5, 1, 5, 100, 99, 98], strict=True)}
+    profile = StyleProfile(
+        shot_duration_s=DEFAULT_PACING,
+        cuts_per_min=20,
+        speech_ratio=10 / (10 + expected_length(DEFAULT_PACING)),
+    )
+    edl = rough_cut(
+        shots,
+        [_asset("a", 0)],
+        RoughCutParams(target_s=9.45, strategy="highlights"),
+        profile,
+        lambda shot: scores[shot.shot_id],
+        ranker_scores=ranks if ranked else None,
+    )
+    assert {c.shot_id for c in edl.clips} == {
+        shots[i].shot_id for i in (expected, 2 if not ranked else 0, 4)
+    }
+
+
+def test_speech_swaps_prioritize_gap_and_preserve_inputs_and_capacity() -> None:
+    cands = [_candidate(i, None) for i in range(5)]
+    for c in cands:
+        c.shot.kind = "talking"
+    cands[1].shot.kind = cands[3].shot.kind = "broll"
+    cands[1].hi, cands[1].score = 1.5, 2
+    picked = cands[::2]
+    before = [c.model_dump() for c in cands]
+    target = 10 / (10 + expected_length(DEFAULT_PACING))
+    # The larger improvement beats the higher incoming score; earlier slot wins ties.
+    assert apply_speech_ratio(picked, cands, target, DEFAULT_PACING) == [
+        cands[0],
+        cands[3],
+        cands[4],
+    ]
+    assert apply_speech_ratio(picked, cands, 1, DEFAULT_PACING) == picked
+    assert apply_speech_ratio(picked, cands, 0, DEFAULT_PACING, min_total_s=15) == [
+        cands[0],
+        cands[3],
+        cands[4],
+    ]
+    assert [c.model_dump() for c in cands] == before
+    assert picked == cands[::2]
+
+
+def test_speech_swap_can_improve_duration_share_without_changing_kinds() -> None:
+    cands = [_candidate(i, None) for i in range(3)]
+    cands[0].shot.kind = cands[1].shot.kind = "talking"
+    cands[2].shot.kind = "broll"
+    cands[1].hi = 2
+    picked = [cands[0], cands[2]]
+    result = apply_speech_ratio(picked, cands, 0.4, DEFAULT_PACING, alternation=1)
+    assert result == [cands[1], cands[2]]
+    # Preserve an existing capacity shortfall as well as a feasible target.
+    assert apply_speech_ratio(picked, cands, 0.4, DEFAULT_PACING, min_total_s=20) == picked
 
 
 @pytest.mark.parametrize(

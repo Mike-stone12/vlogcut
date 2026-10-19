@@ -131,7 +131,9 @@ flags are skipped: references are finished edits), then aggregate:
 - Audio: EDL-derived speech ratio measures talking timeline duration / known-kind
   timeline duration from analyzed shots, including clip speeds. The LLM prompt
   describes a measured value as guidance for the talking/b-roll duration split;
-  the rules planner and validation still ignore it. Reference-video
+  the rules planner swaps eligible shots toward its estimated duration share after
+  alternation, without worsening a measured alternation gap. Validation still
+  ignores it. Reference-video
   speech measurement, speech-over-music ratio and whether clip audio is kept under
   music remain planned
 - Look: brightness / saturation / warmth stats measured from reference proxies into
@@ -200,6 +202,18 @@ for it, it is not explainable, and it would break principle 2.
   and cold-open selection. It reuses eligible candidates and blended scores,
   preserving chronology, count, duplicate-group adjacency and duration capacity.
   Missing profile, structure or alternation preserves the existing EDL bytes.
+- Measured `speech_ratio` (including zero) enables a second bounded greedy swap
+  pass after alternation and before length assignment. Estimate talking clips at
+  min(p90, usable duration), b-roll at min(expected pacing length, that cap), and
+  exclude unknown kinds from both totals. Undefined share leaves selection alone.
+  Each swap strictly reduces the absolute speech-share gap without increasing a
+  measured alternation gap. Choose the largest improvement, then higher incoming
+  blended score, earlier selected position and earlier candidate. Reuse the
+  alternation pass's eligibility, chronology, duplicate and capacity checks; stop
+  after at most the selected clip count. Missing profile or unmeasured speech ratio
+  preserves EDL bytes. Fitting, montage, snapping and cold-open logic are unchanged;
+  the estimate guides selection, so final duration share may differ after fitting.
+  Validation still ignores speech ratio.
 - Output: `EDL`; the rules planner aligns an in- or out-point to a cut-point candidate
   when a fixed-length window fits within the usable part and the maximum shift
 - `plan/llm.py` provides deterministic prompt building and EDL parsing via
@@ -363,7 +377,11 @@ values, and style diff adds a row when both sides measure it. The LLM planner's
 initial prompt describes a measured value, including zero, with two decimal places
 as guidance for the talking/b-roll timeline duration split. Unmeasured values add
 no line and preserve prompt bytes; repair rounds reuse the conversation without
-repeating the line. The rules planner and validation still ignore speech ratio.
+repeating the line. The rules planner uses measured speech ratio, including zero,
+for bounded swaps after alternation, targeting estimated talking / known-kind
+duration while preserving a no-worse measured alternation gap. Talking estimates
+use the pacing/usable cap; b-roll uses the smaller of expected pacing length and
+that cap. Unmeasured values preserve EDL bytes; validation still ignores speech ratio.
 Unmeasured values still serialize as `"speech_ratio":null`,
 preserving existing profile JSON bytes; no schema change is needed.
 `StyleProfile.transitions: TransitionMix | None = None` follows the same convention:
@@ -681,6 +699,18 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: rules planner speech ratio — estimate talking duration at
+  min(p90, usable duration) and b-roll at min(expected pacing length, that cap),
+  excluding unknown kinds from both totals. After clip-count selection and the
+  alternation pass, make at most one swap per selected clip, each strictly reducing
+  the estimated speech-share gap; measured alternation must be no worse after each
+  swap. Prefer largest improvement, then incoming blended score and earlier position.
+  Share chronology, duplicate-group and duration-capacity checks with alternation.
+  Length assignment and later shaping remain unchanged; final measured share is an
+  approximation. Missing profile or `speech_ratio=None` bypasses the pass and
+  preserves EDL JSON bytes; zero is measured. Validation, schemas, LLM planning,
+  CLI and reference-video speech measurement are unchanged.
 
 - 2026-10-19: LLM planner speech-ratio guidance — a measured `speech_ratio`,
   including zero, adds exactly one initial style-guidance line with two decimal
