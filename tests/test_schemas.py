@@ -265,6 +265,38 @@ def test_style_profile_duration_stats_ordered():
     assert profile.version == 1
 
 
+def test_old_profile_json_has_unmeasured_music_bpm() -> None:
+    profile = StyleProfile.model_validate_json(
+        '{"shot_duration_s":{"p10":1,"median":2,"p90":4},"cuts_per_min":20}'
+    )
+    assert profile.music_bpm is None
+    assert "music_bpm" not in profile.model_dump()
+    assert '"music_bpm"' not in profile.model_dump_json()
+
+
+@pytest.mark.parametrize("value", [0, -1, float("inf"), float("-inf"), float("nan")])
+def test_music_bpm_rejects_non_positive_or_non_finite(value: float) -> None:
+    with pytest.raises(ValidationError, match="music_bpm"):
+        StyleProfile(
+            shot_duration_s=DurationStats(p10=1, median=2, p90=4),
+            cuts_per_min=20,
+            music_bpm=value,
+        )
+
+
+@pytest.mark.parametrize("value", [None, 0.1, 120.0, 123.45])
+def test_music_bpm_round_trips(value: float | None) -> None:
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1, median=2, p90=4),
+        cuts_per_min=20,
+        music_bpm=value,
+    )
+    payload = profile.model_dump_json()
+    assert StyleProfile.model_validate_json(payload) == profile
+    assert ('"music_bpm":' in payload) == (value is not None)
+    assert ("music_bpm" in profile.model_dump()) == (value is not None)
+
+
 def test_style_profile_cold_open_default_and_old_json() -> None:
     profile = StyleProfile(shot_duration_s=DurationStats(p10=1, median=2, p90=4), cuts_per_min=20)
     assert profile.cold_open_clips == 0

@@ -104,8 +104,12 @@ flags are skipped: references are finished edits), then aggregate:
   is measured under structure; a full pacing curve remains planned
 - Music: beat-aligned cut ratio (cut within ±80 ms of a beat in the reference's own
   audio), pooled over references with detected beats via `analyze/beats.py`.
+  `music_bpm` is 60 / median of pooled positive inter-beat intervals from each
+  reference's sorted beats, without bridging references. Disabled detection in any
+  reference or no intervals leaves BPM unmeasured. Style show displays measured BPM;
+  style distance, `style diff`, both planners and validation ignore it for now.
   Chosen-music beat snapping is wired as opt-in via `pipeline.cut(music=...)`.
-  Profile BPM and energy curve remain planned
+  The profile energy curve remains planned
 - Structure ("grammar"): montage bursts are now measured as the share of shots in
   runs of at least three shots shorter than half the pooled median, within each
   reference. Intro-vs-body pacing is the pooled median duration of shots starting
@@ -378,6 +382,19 @@ still loads. `kind` is only `pause` for now; other kinds will add literals later
 `StyleProfile.beat_aligned_ratio` pools aligned cuts / total cuts over references with
 detected beats. It is `None` if beat detection is disabled for any reference, no
 reference has beats, or the pooled cut count is zero.
+
+`StyleProfile.music_bpm: float | None = None` is finite and strictly positive when
+measured. It measures the references' own audio: sort each reference's detected
+beat times, keep positive adjacent intervals, pool those intervals across references,
+then compute 60 / median(intervals). Never bridge references or average their BPMs.
+References with fewer than two beats contribute no intervals. Disabled beat detection
+for any reference, no pooled intervals, and EDL-derived profiles leave it `None`
+(not measured). Old profile JSON without the field loads with `None`; unmeasured
+values are omitted from serialization using the same wrap-serializer convention as
+`StructureStats.kind_alternation`, preserving existing profile JSON bytes. Measured
+values round-trip and appear in `style show` with one decimal place. Style distance,
+`style diff`, both planners and validation ignore `music_bpm` for now.
+
 `StyleProfile.speech_ratio` is measured by `profile_from_edl(..., shots=...)`:
 map each clip's shot ID through `analyze/kind.classify_kind`, then divide the total
 speed-adjusted timeline duration of `talking` clips by that of all known-kind
@@ -714,6 +731,18 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: reference music tempo — **schema change**: optional finite, positive
+  `StyleProfile.music_bpm` measures 60 / median of pooled positive intervals within
+  each reference's sorted detected beats. Pool intervals rather than per-reference
+  BPMs; never bridge reference boundaries. Any disabled detection or no intervals
+  yields `None`; EDL-derived profiles also leave it unmeasured. Reuse the required
+  beat times already stored in `ReferenceCuts`; records missing beat times or the
+  enabled beats parameter are cache misses, and parameter changes invalidate caches.
+  No detector change or new dependency. Omit unmeasured BPM from serialization to
+  preserve old JSON bytes; display measured BPM with one decimal place in style show.
+  Style distance, `style diff`, both planners and validation ignore `music_bpm` for
+  now. Energy curves and chosen-music analysis are outside this change.
 
 - 2026-10-19: ranker training CLI — `ranker train` names the saved artifact and
   mirrors `style build` as a separate preparation step for `cut --ranker`.

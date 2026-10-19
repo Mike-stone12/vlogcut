@@ -188,6 +188,7 @@ class StyleProfile(BaseModel):
     shot_duration_s: DurationStats
     cuts_per_min: float = Field(gt=0)
     beat_aligned_ratio: float | None = Field(default=None, ge=0, le=1)  # None = not measured
+    music_bpm: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     bpm_range: tuple[float, float] | None = None
     intro_s: float | None = None
     # User-set leading clips exempt from chronology; 0 disables cold opens.
@@ -198,6 +199,14 @@ class StyleProfile(BaseModel):
     look: LookStats | None = None  # None = not measured
     subtitle: SubtitleStyle = Field(default_factory=SubtitleStyle)
     notes: str = ""  # short natural-language summary
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        # Preserve existing profile JSON bytes when tempo was not measured.
+        data = handler(self)
+        if self.music_bpm is None:
+            data.pop("music_bpm", None)
+        return data
 
     @field_validator("look", mode="before")
     @classmethod

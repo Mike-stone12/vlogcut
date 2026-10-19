@@ -26,6 +26,7 @@ from vlogcut.style.profile import (
     kind_alternation,
     montage_share,
     pooled_beat_ratio,
+    pooled_bpm,
     shot_durations,
     transition_mix,
 )
@@ -33,6 +34,35 @@ from vlogcut.style.profile import (
 # ---------------------------------------------------------------------------
 # pure aggregation
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("beat_lists", "expected"),
+    [
+        ([[0, 0.5, 1, 1.5]], 120.0),
+        ([[0, 0.5], [100, 101]], 80.0),  # median(.5, 1), with no inter-reference gap
+        ([[0, 0.5, 1, 1.5], [0, 1]], 120.0),  # pool intervals, not reference BPMs
+        ([[], [50], [0, 0.5]], 120.0),
+        ([[1, 0, 0.5, 0.5]], 120.0),  # sort without mutating; skip zero intervals
+        ([[1, 1]], None),
+        ([[], [50]], None),
+        ([[], []], None),
+        ([], None),
+    ],
+)
+def test_pooled_bpm(beat_lists: list[list[float]], expected: float | None) -> None:
+    original = [beats[:] for beats in beat_lists]
+    assert pooled_bpm(beat_lists) == expected
+    assert beat_lists == original
+
+
+def test_aggregate_music_bpm_pools_reference_intervals() -> None:
+    a = _ref("a", 60, [], beats=[0, 0.5, 1, 1.5])
+    b = _ref("b", 120, [20], beats=[100, 101])
+    beatless = _ref("c", 60, [10])
+    single = _ref("d", 60, [10], beats=[50])
+    assert aggregate([a, b, beatless, single], ReferenceParams()).music_bpm == 120.0
+    assert aggregate([beatless, single], ReferenceParams()).music_bpm is None
 
 
 def test_aggregate_references_leave_kind_alternation_unmeasured() -> None:
@@ -381,12 +411,13 @@ def test_aggregate_pools_beat_counts_and_excludes_beatless_references() -> None:
 
 @pytest.mark.parametrize("disabled_reference", [False, True])
 def test_aggregate_beats_disabled(disabled_reference: bool) -> None:
-    a = _ref("a", 60, [10], beats=[10])
-    b = _ref("b", 60, [20], beats=[20])
+    a = _ref("a", 60, [10], beats=[10, 10.5])
+    b = _ref("b", 60, [20], beats=[20, 20.5])
     params = ReferenceParams(beats=disabled_reference)
     if disabled_reference:
         b.params.beats = False
     assert aggregate([a, b], params).beat_aligned_ratio is None
+    assert aggregate([a, b], params).music_bpm is None
 
 
 def test_aggregate_beats_use_surviving_rounded_boundaries() -> None:
@@ -544,12 +575,17 @@ def test_old_reference_cache_is_recomputed(
     assert analyze_reference("a.mp4", tmp_path, params) == record
 
 
+@pytest.mark.parametrize("missing", ["times", "flag", "both"])
 def test_old_beat_cache_is_recomputed_and_beats_switch_invalidates(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
 ) -> None:
     params = ReferenceParams(dissolves=False, look=False)
-    old = _ref("a", 60, [10]).model_dump(exclude={"beats"})
-    old["params"] = params.model_dump(exclude={"beats"})
+    old = _ref("a", 60, [10]).model_dump()
+    old["params"] = params.model_dump()
+    if missing in ("times", "both"):
+        old.pop("beats")
+    if missing in ("flag", "both"):
+        old["params"].pop("beats")
     cache = tmp_path / "style" / "a.cuts.json"
     cache.parent.mkdir()
     cache.write_text(json.dumps(old), encoding="utf-8")
@@ -581,10 +617,13 @@ def test_old_beat_cache_is_recomputed_and_beats_switch_invalidates(
     monkeypatch.setattr(pauses_mod, "load_mono_audio", lambda *a: pytest.fail("re-decoded"))
     assert analyze_reference("a.mp4", tmp_path, params) == record
     assert build_profile(["a.mp4"], tmp_path, params).beat_aligned_ratio == 1.0
+    # Pool beat intervals, rather than using the detector's separate BPM estimate.
+    assert build_profile(["a.mp4"], tmp_path, params).music_bpm == 6.0
 
     disabled = params.model_copy(update={"beats": False})
     record = analyze_reference("a.mp4", tmp_path, disabled)
     assert record.params == disabled and record.beats == []
+    assert build_profile(["a.mp4"], tmp_path, disabled).music_bpm is None
     monkeypatch.setattr(pauses_mod, "load_mono_audio", decode)
     monkeypatch.setattr(beats_mod, "detect_beats", detect)
     assert analyze_reference("a.mp4", tmp_path, params).beats == [10, 20]

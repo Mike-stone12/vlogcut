@@ -41,7 +41,7 @@ class ReferenceParams(BaseModel):
     # them away and inflate p10 for fast-cutting creators
     min_shot_s: float = Field(default=0.25, gt=0)
     dissolves: bool = True  # also find cross-dissolves / fades (analyze.transitions)
-    beats: bool = True  # measure alignment to the reference's own audio
+    beats: bool = True  # measure alignment and tempo of the reference's own audio
     look: bool = True  # sample RGB appearance from the proxy
 
 
@@ -182,6 +182,17 @@ def transition_mix(n_dissolves: int | None, n_cuts: int) -> TransitionMix | None
     return TransitionMix(hard_cut=1 - dissolve, dissolve=dissolve)
 
 
+def pooled_bpm(beat_lists: Sequence[Sequence[float]]) -> float | None:
+    """Tempo from pooled positive intervals, never crossing reference boundaries."""
+    intervals: list[float] = []
+    for beats in beat_lists:
+        ordered = sorted(beats)
+        intervals.extend(
+            right - left for left, right in zip(ordered, ordered[1:], strict=False) if right > left
+        )
+    return 60 / statistics.median(intervals) if intervals else None
+
+
 def pooled_beat_ratio(
     refs: Sequence[ReferenceCuts], per_ref_cuts: Sequence[Sequence[float]]
 ) -> float | None:
@@ -205,6 +216,7 @@ def profile_from_durations(
     *,
     n_dissolves: int | None = None,
     beat_ratio: float | None = None,
+    music_bpm: float | None = None,
     look_stats: Sequence[LookStats | None] = (),
 ) -> StyleProfile:
     """Pool finished edits into one profile: a single duration distribution over all
@@ -240,6 +252,7 @@ def profile_from_durations(
             else None
         ),
         beat_aligned_ratio=beat_ratio,
+        music_bpm=music_bpm,
         look=look.pool_look(look_stats),
         notes=notes,
     )
@@ -263,6 +276,11 @@ def aggregate(refs: Sequence[ReferenceCuts], params: ReferenceParams) -> StylePr
         [[end - start for start, end in ss] for ss in spans],
         [r.source for r in refs],
         n_dissolves=n_dissolves,
+        music_bpm=(
+            pooled_bpm([r.beats for r in refs])
+            if params.beats and all(r.params.beats for r in refs)
+            else None
+        ),
         look_stats=(
             [r.look for r in refs] if params.look and all(r.params.look for r in refs) else ()
         ),
@@ -374,6 +392,8 @@ def _load_cache(
     except (ValidationError, ValueError):
         return None
     if record.asset_id != asset_id or record.params != params:
+        return None
+    if params.beats and "beats" not in record.params.model_fields_set:
         return None
     if params.look and (
         "look" not in record.model_fields_set or "look" not in record.params.model_fields_set
