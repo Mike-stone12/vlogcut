@@ -137,9 +137,10 @@ explainable, and it would break principle 2.
   a JSON list to `edl/<stem>.violations.json`, replacing any previous report even
   when empty. The CLI reports the results; violations are non-fatal and rendering
   continues. Check coverage and current limits are recorded under 2026-10-26 below.
-- Planned deterministic post-processing first: snap cut points to the nearest beat within
-  tolerance (needs the chosen music, so it runs after planning and before the checks),
-  audio fades, subtitle timing from ASR
+- Deterministic post-processing: `plan/snap.snap_to_beats` exists as a pure helper
+  to snap boundaries to the nearest beat within tolerance, but is not wired in.
+  Chosen-music analysis, pipeline wiring after planning and before checks, and
+  `MusicTrack` remain planned, as do audio fades and subtitle timing from ASR.
 - Hard checks (code): shot ids exist; in/out inside shot bounds; no rejected shots;
   total duration within ±10 % of target; clip durations within the profile range
   (with tolerance); no back-to-back clips from the same `dup_group`; chronological
@@ -148,7 +149,7 @@ explainable, and it would break principle 2.
   types and audio modes allowed by the profile
 - Planned repair on failure: structured error list goes back to the planner (max N
   rounds), then a rule-based fallback fix. Repair, fallback fixes and beat snapping
-  remain planned.
+  integration remain planned.
 
 ### 6. Render / export
 - Preview mp4 (`render/preview.py`): FFmpeg on proxies (fast, low-res); cached clip
@@ -690,6 +691,20 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   errors on real music, no tempo changes, and footage without music gives no beats
   when no regular pulse is detected. Chosen-music analysis, planner beat snapping,
   `MusicTrack`, beat validation and speech ratio remain unwired; no schema change.
+
+- 2026-10-30: beat snapping helper — `plan/snap.snap_to_beats` visits internal
+  boundaries left to right using the already updated clips. Beats are programme
+  timeline seconds; applying a music cue delay is the caller's responsibility.
+  The nearest beat within inclusive 0.08 s tolerance (1e-12 s floating-point
+  allowance) wins, with earlier beats preferred on ties. A local edit moves the
+  outgoing out-point and incoming in-point by the timeline delta times each
+  clip's speed, preserving other boundaries and the total to floating-point
+  precision. Skip shifts outside shot-relative bounds, below the minimum clip
+  timeline duration (default 0.25 s), or breaking adjacent dissolve lengths or
+  half-window fit. Both boundaries around an unknown shot ID are skipped. The
+  helper returns a new EDL, preserving transitions, audio and other metadata;
+  inputs are never mutated. No schema change or pipeline wiring. Chosen-music
+  analysis and `MusicTrack` remain planned.
 
 ## Open questions
 
