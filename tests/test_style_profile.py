@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from vlogcut.analyze import beats as beats_mod
+from vlogcut.analyze import pauses as pauses_mod
 from vlogcut.analyze import shots as shots_mod
 from vlogcut.schemas import MediaAsset
 from vlogcut.style import ReferenceParams, StyleError, build_profile, load_profile
@@ -16,6 +19,7 @@ from vlogcut.style.profile import (
     analyze_reference,
     combine_cuts,
     duration_stats,
+    pooled_beat_ratio,
     shot_durations,
     transition_mix,
 )
@@ -44,11 +48,16 @@ def test_duration_stats_needs_at_least_two_shots():
 
 
 def _ref(
-    name: str, duration: float, cuts: list[float], dissolves: list[float] | None = None
+    name: str,
+    duration: float,
+    cuts: list[float],
+    dissolves: list[float] | None = None,
+    *,
+    beats: list[float] | None = None,
 ) -> ReferenceCuts:
     return ReferenceCuts(
         asset_id=name, source=f"{name}.mp4", duration_s=duration, params=ReferenceParams(),
-        cuts=cuts, dissolve_cuts=dissolves or [],
+        cuts=cuts, dissolve_cuts=dissolves or [], beats=beats or [],
     )  # fmt: skip
 
 
@@ -107,6 +116,61 @@ def test_aggregate_pools_shots_and_rates_by_total_time():
 def test_aggregate_without_references_raises():
     with pytest.raises(StyleError, match="reference"):
         aggregate([], ReferenceParams())
+
+
+@pytest.mark.parametrize(
+    ("beats", "expected"),
+    [([10, 20], 1.0), ([10], 0.5), ([9.92, 20.081], 0.5), ([5], 0.0), ([], None)],
+)
+def test_aggregate_beat_alignment(beats: list[float], expected: float | None) -> None:
+    ref = _ref("a", 60, [10, 20], beats=beats)
+    profile = aggregate([ref], ReferenceParams())
+    assert profile.beat_aligned_ratio == expected
+    if expected is not None:
+        assert f"{expected:.1%} beat-aligned cuts" in profile.notes
+
+
+def test_aggregate_pools_beat_counts_and_excludes_beatless_references() -> None:
+    a = _ref("a", 60, [10, 20, 30], beats=[10, 20, 30])
+    b = _ref("b", 60, [10], beats=[20])
+    beatless = _ref("c", 60, [10, 20, 30, 40])
+    profile = aggregate([a, b, beatless], ReferenceParams())
+    assert profile.beat_aligned_ratio == 0.75  # 3/4, not mean(1, 0) or 3/8
+
+
+@pytest.mark.parametrize("disabled_reference", [False, True])
+def test_aggregate_beats_disabled(disabled_reference: bool) -> None:
+    a = _ref("a", 60, [10], beats=[10])
+    b = _ref("b", 60, [20], beats=[20])
+    params = ReferenceParams(beats=disabled_reference)
+    if disabled_reference:
+        b.params.beats = False
+    assert aggregate([a, b], params).beat_aligned_ratio is None
+
+
+def test_aggregate_beats_use_surviving_rounded_boundaries() -> None:
+    ref = _ref("a", 8, [2, 2.1, 5.0000001], [5.0000001], beats=[2, 5.08])
+    assert aggregate([ref], ReferenceParams()).beat_aligned_ratio == 0.5
+
+
+def test_beat_pool_without_surviving_cuts_is_unmeasured() -> None:
+    ref = _ref("a", 60, [], beats=[10])
+    assert pooled_beat_ratio([ref], [[]]) is None
+    # A beatless reference can supply pacing while the measured pool has no cuts.
+    beatless = _ref("b", 60, [20])
+    assert aggregate([ref, beatless], ReferenceParams()).beat_aligned_ratio is None
+
+
+@pytest.mark.parametrize("dissolves", [False, True])
+def test_unmeasured_beats_preserve_notes(dissolves: bool) -> None:
+    ref = _ref("a", 60, [20, 40])
+    expected = "1 reference, 1.0 min, 2 cuts; median shot 20.0 s (p10 20.0, p90 20.0); 2.0 cuts/min"
+    if dissolves:
+        expected += "; 0.0% dissolves"
+    assert aggregate([ref], ReferenceParams(dissolves=dissolves)).notes == expected
+    ref.beats = [20, 40]
+    ref.params.beats = False
+    assert aggregate([ref], ReferenceParams(dissolves=dissolves)).notes == expected
 
 
 def test_aggregate_pools_transition_counts():
@@ -168,6 +232,7 @@ def test_analyze_reference_records_only_surviving_dissolves(
         asset_id="a",
         path="a.mp4",
         proxy_path="proxy.mp4",
+        has_audio=False,
         duration_s=60,
         fps=30,
         width=64,
@@ -211,6 +276,7 @@ def test_old_reference_cache_is_recomputed(
         asset_id="a",
         path="a.mp4",
         proxy_path="proxy.mp4",
+        has_audio=False,
         duration_s=60,
         fps=30,
         width=64,
@@ -233,6 +299,71 @@ def test_old_reference_cache_is_recomputed(
     assert analyze_reference("a.mp4", tmp_path, params) == record
 
 
+def test_old_beat_cache_is_recomputed_and_beats_switch_invalidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    params = ReferenceParams(dissolves=False)
+    old = _ref("a", 60, [10]).model_dump(exclude={"beats"})
+    old["params"] = params.model_dump(exclude={"beats"})
+    cache = tmp_path / "style" / "a.cuts.json"
+    cache.parent.mkdir()
+    cache.write_text(json.dumps(old), encoding="utf-8")
+    asset = MediaAsset(
+        asset_id="a", path="a.mp4", proxy_path="proxy.mp4", duration_s=60,
+        fps=30, width=64, height=64,
+    )  # fmt: skip
+    monkeypatch.setattr(profile_mod, "probe_asset", lambda path: asset)
+    monkeypatch.setattr(profile_mod, "make_proxy", lambda asset, ws: asset)
+    monkeypatch.setattr(shots_mod, "detect_cuts", lambda *a, **k: [10, 20])
+    samples = [0.0, 1.0, 0.0]
+
+    def decode(path: str, sample_rate: int) -> list[float]:
+        assert path == asset.proxy_path and sample_rate == 22050
+        return samples
+
+    def detect(audio: list[float], sample_rate: int) -> beats_mod.BeatResult:
+        assert audio is samples and sample_rate == 22050
+        return beats_mod.BeatResult(120, [20, 10])
+
+    monkeypatch.setattr(pauses_mod, "load_mono_audio", decode)
+    monkeypatch.setattr(beats_mod, "detect_beats", detect)
+    record = analyze_reference("a.mp4", tmp_path, params)
+    assert record.beats == [10, 20]
+    assert ReferenceCuts.model_validate_json(cache.read_text(encoding="utf-8")) == record
+    monkeypatch.setattr(beats_mod, "detect_beats", lambda *a: pytest.fail("re-detected beats"))
+    monkeypatch.setattr(pauses_mod, "load_mono_audio", lambda *a: pytest.fail("re-decoded"))
+    assert analyze_reference("a.mp4", tmp_path, params) == record
+    assert build_profile(["a.mp4"], tmp_path, params).beat_aligned_ratio == 1.0
+
+    disabled = params.model_copy(update={"beats": False})
+    record = analyze_reference("a.mp4", tmp_path, disabled)
+    assert record.params == disabled and record.beats == []
+    monkeypatch.setattr(pauses_mod, "load_mono_audio", decode)
+    monkeypatch.setattr(beats_mod, "detect_beats", detect)
+    assert analyze_reference("a.mp4", tmp_path, params).beats == [10, 20]
+
+
+@pytest.mark.parametrize("has_audio", [False, True])
+def test_reference_without_audio_has_no_beats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, has_audio: bool
+) -> None:
+    asset = MediaAsset(
+        asset_id="a", path="a.mp4", proxy_path="proxy.mp4", duration_s=60,
+        fps=30, width=64, height=64, has_audio=has_audio,
+    )  # fmt: skip
+    monkeypatch.setattr(profile_mod, "probe_asset", lambda path: asset)
+    monkeypatch.setattr(profile_mod, "make_proxy", lambda asset, ws: asset)
+    monkeypatch.setattr(shots_mod, "detect_cuts", lambda *a, **k: [10, 20])
+    monkeypatch.setattr(
+        pauses_mod,
+        "load_mono_audio",
+        lambda *a: None if has_audio else pytest.fail("decoded asset without audio"),
+    )
+    monkeypatch.setattr(beats_mod, "detect_beats", lambda *a: pytest.fail("detected no audio"))
+    record = analyze_reference("a.mp4", tmp_path, ReferenceParams(dissolves=False))
+    assert record.beats == []
+
+
 def test_load_profile_round_trips_and_rejects_bad_files(tmp_path):
     profile = aggregate([_ref("a", 60.0, [10.0, 20.0, 30.0])], ReferenceParams())
     path = tmp_path / "p.json"
@@ -250,6 +381,33 @@ def test_load_profile_round_trips_and_rejects_bad_files(tmp_path):
 # ---------------------------------------------------------------------------
 # real detector on generated "finished" clips
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.scenedetect
+@pytest.mark.parametrize("phase_s", [0.0, 0.25])
+def test_reference_pulse_audio_alignment(
+    make_edited_clip: Callable[..., Path], tmp_path: Path, phase_s: float
+) -> None:
+    from vlogcut.ingest import ffmpeg
+
+    video = make_edited_clip("cuts.mp4", shot_lengths=[1.0] * 8, size="64x64")
+    reference = tmp_path / "with_audio.mp4"
+    # 120 BPM pulses: integer-second cuts align at phase 0, miss at phase 0.25.
+    pulse = f"aevalsrc='0.8*sin(2*PI*1000*t)*lt(mod(t+{phase_s},0.5),0.02)':s=22050:d=8"
+    ffmpeg.run(
+        "ffmpeg",
+        [
+            "-v", "error", "-y", "-i", str(video), "-f", "lavfi", "-i", pulse,
+            "-c:v", "copy", "-c:a", "aac", "-shortest", str(reference),
+        ],
+    )  # fmt: skip
+    profile = build_profile([reference], tmp_path / "ws", ReferenceParams(dissolves=False))
+    assert profile.beat_aligned_ratio is not None
+    if phase_s == 0:
+        assert profile.beat_aligned_ratio > 0.8
+    else:
+        assert profile.beat_aligned_ratio < 0.2
 
 
 @pytest.mark.ffmpeg

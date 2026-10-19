@@ -1,7 +1,8 @@
-"""Style profile from reference videos: finished edits -> pacing and transitions.
+"""Style profile from reference videos: pacing, transitions and beat alignment.
 
 PoC slice: the shot-duration distribution (p10 / median / p90) and cuts per minute,
-pooled over all references, plus their transition mix. Structure, beat and speech come later.
+pooled over all references, plus transition mix and beat alignment. Structure and speech
+come later.
 
 References are finished edits, so this does not reuse `analyze.detect_shots`: that step
 splits long shots into equal parts (which would destroy the duration distribution) and
@@ -36,6 +37,7 @@ class ReferenceParams(BaseModel):
     # them away and inflate p10 for fast-cutting creators
     min_shot_s: float = Field(default=0.25, gt=0)
     dissolves: bool = True  # also find cross-dissolves / fades (analyze.transitions)
+    beats: bool = True  # measure alignment to the reference's own audio
 
 
 class ReferenceCuts(BaseModel):
@@ -47,6 +49,7 @@ class ReferenceCuts(BaseModel):
     params: ReferenceParams
     cuts: list[float]  # hard cuts + dissolve midpoints, seconds
     dissolve_cuts: list[float]  # required: old caches must be recomputed
+    beats: list[float]  # sorted reference-timeline seconds; required for cache invalidation
 
     @model_validator(mode="after")
     def _dissolves_are_cuts(self) -> ReferenceCuts:
@@ -110,11 +113,29 @@ def transition_mix(n_dissolves: int | None, n_cuts: int) -> TransitionMix | None
     return TransitionMix(hard_cut=1 - dissolve, dissolve=dissolve)
 
 
+def pooled_beat_ratio(
+    refs: Sequence[ReferenceCuts], per_ref_cuts: Sequence[Sequence[float]]
+) -> float | None:
+    """Pool aligned / surviving cuts only over references with measured beats."""
+    from vlogcut.analyze.beats import beat_aligned_ratio
+
+    if any(not ref.params.beats for ref in refs):
+        return None
+    aligned, total = 0, 0
+    for ref, cuts in zip(refs, per_ref_cuts, strict=True):
+        ratio = beat_aligned_ratio(cuts, ref.beats)
+        if ratio is not None:
+            aligned += round(ratio * len(cuts))
+            total += len(cuts)
+    return aligned / total if total else None
+
+
 def profile_from_durations(
     per_ref: Sequence[Sequence[float]],
     source_refs: Sequence[str],
     *,
     n_dissolves: int | None = None,
+    beat_ratio: float | None = None,
 ) -> StyleProfile:
     """Pool finished edits into one profile: a single duration distribution over all
     shots, and cuts per minute from the totals, so a short reference does not weigh as
@@ -134,11 +155,14 @@ def profile_from_durations(
     notes = summarize(len(per_ref), total_s, n_cuts, stats, cuts_per_min)
     if mix is not None:
         notes += f"; {mix.dissolve:.1%} dissolves"
+    if beat_ratio is not None:
+        notes += f"; {beat_ratio:.1%} beat-aligned cuts"
     return StyleProfile(
         source_refs=list(source_refs),
         shot_duration_s=stats,
         cuts_per_min=cuts_per_min,
         transitions=mix,
+        beat_aligned_ratio=beat_ratio,
         notes=notes,
     )
 
@@ -161,6 +185,11 @@ def aggregate(refs: Sequence[ReferenceCuts], params: ReferenceParams) -> StylePr
         [[end - start for start, end in ss] for ss in spans],
         [r.source for r in refs],
         n_dissolves=n_dissolves,
+        beat_ratio=(
+            pooled_beat_ratio(refs, [[end for _, end in ss[:-1]] for ss in spans])
+            if params.beats
+            else None
+        ),
     )
 
 
@@ -195,9 +224,18 @@ def analyze_reference(
             transitions.load_frames(asset.proxy_path), transitions.SAMPLE_FPS
         )
         cuts, dissolve_cuts = combine_cuts(cuts, found, params.min_shot_s)
+    beats = []
+    if params.beats and asset.has_audio:
+        from vlogcut.analyze.beats import BeatParams, detect_beats
+        from vlogcut.analyze.pauses import load_mono_audio
+
+        sample_rate = BeatParams().sample_rate
+        samples = load_mono_audio(asset.proxy_path, sample_rate)
+        if samples is not None:
+            beats = sorted(detect_beats(samples, sample_rate).beats)
     record = ReferenceCuts(
         asset_id=asset.asset_id, source=str(path), duration_s=asset.duration_s, params=params,
-        cuts=cuts, dissolve_cuts=dissolve_cuts,
+        cuts=cuts, dissolve_cuts=dissolve_cuts, beats=beats,
     )  # fmt: skip
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = cache_path.with_suffix(".part")
@@ -212,7 +250,7 @@ def build_profile(
     params: ReferenceParams | None = None,
     progress: Progress = log.info,
 ) -> StyleProfile:
-    """Reference videos -> `StyleProfile` (pacing and transition mix)."""
+    """Reference videos -> `StyleProfile` (pacing, transition mix and beat alignment)."""
     params = params or ReferenceParams()
     refs = []
     for i, path in enumerate(paths, 1):
