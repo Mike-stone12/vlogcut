@@ -74,8 +74,11 @@ ingest → analyze → plan → validate/repair → render/export → feedback
 - Near-duplicates: CLIP/SigLIP keyframe embeddings, clustered into `dup_group`. Chunks
   split from one long take share a group without any embedding.
 - Speech: VAD + ASR (Whisper / FunASR) only when speech is present
-- Shot kind (planned): `talking` / `broll` from VAD + caption; feeds the structure
-  dimension of the style profile and the planner
+- Shot kind: `talking` / `broll` from the existing `kept_for_audio` signal via
+  `analyze/kind.py`, populated by the pipeline on fresh analysis and cache hits.
+  This is the rules planner's audio-activity heuristic, not speech-specific VAD;
+  rejected shots remain unmeasured because quality analysis clears their warnings.
+  Caption-based refinement and talking/b-roll alternation measurement remain planned
 - Caption: **captioner** role (VLM) on 1–3 keyframes → description, tags, interest 1–5.
   The core and cached batch layer exist in `analyze/caption.py` via `ModelRouter`,
   with rejected-shot filtering and caching (model name in the cache key).
@@ -388,12 +391,23 @@ by silence; music still plays), or `duck` (camera audio attenuated by a fixed ga
 to sit under music). It defaults to `keep`, so old EDL JSON without the field still
 loads with the same audio behaviour.
 
+`Shot.kind: Literal["talking", "broll"] | None = None` makes the existing planner
+kind explicit. `None` means not measured, distinct from either kind; old shot JSON
+without the field still loads with `None`. The pure `analyze/kind.classify_kind`
+prefers an explicit kind, otherwise maps the `kept_for_audio` quality warning to
+`talking` and its absence on eligible shots to `broll`. Rejected shots return `None`
+because quality analysis clears their warnings. The flag comes from audio activity
+saving an otherwise shaky shot, so this is a coarse heuristic, not confirmed speech
+or confirmed absence of speech. The pipeline backfills legacy quality-cache records
+after loading without re-analysis or cache invalidation, and writes the field in
+`shots.json`. Rules scoring, length assignment and placement share this helper;
+legacy eligible shots retain identical EDL bytes. Caption refinement remains planned.
+
 Planned additions (remaining fields land with the module that needs them):
 
 | Field / model | Why |
 |---|---|
 | `MusicCue.end_s`, ducking params | music mixing needs an end and a level under speech |
-| `Shot.kind` (talking / broll) | structure dimension |
 | `StyleProfile.structure` | exists with `montage_share` and `intro_pace_ratio`; talking/b-roll alternation, intro length and cold-open measurement remain planned |
 | `Run` manifest (inputs fingerprint → outputs) | EDL file names collide once profile version, brief, variant and model all vary |
 
@@ -472,6 +486,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 3 · analyze: Shot.kind talking / broll from the existing speech signal (schemas.py, analyze/kind.py)
 - [x] Week 4 · learn: shot pairs derived from variant preference pairs (learn/feedback_pairs.py)
 - [x] Week 4 · plan: opt-in ranker scores in cut via --ranker (pipeline.py, cli.py, plan/llm.py)
 - [x] Week 4 · plan: rules planner blends optional ranker scores (plan/rules.py)
@@ -559,6 +574,13 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: Shot.kind reuses the rules planner's `kept_for_audio` heuristic;
+  no new speech detector or dependency. Explicit kinds take precedence. Rejected
+  shots are unmeasured because quality analysis discards their audio warning;
+  eligible shots without the warning retain the planner's b-roll classification.
+  Backfill in the pipeline after quality-cache loading without changing cache keys.
+  The shot table has no kind column, so its prompt bytes remain unchanged.
 
 - 2026-10-19: feedback-derived shot pairs — the pure
   `learn/feedback_pairs.shot_pairs_from_preferences` looks up EDLs by variant ID

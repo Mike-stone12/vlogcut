@@ -80,6 +80,43 @@ def _edl(shot_id: str = "s") -> EDL:
     )  # fmt: skip
 
 
+@pytest.mark.parametrize("workers", [1, 3])
+def test_analyze_populates_kind_and_backfills_legacy_quality_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int
+) -> None:
+    asset = _assets()[0]
+    spans = [
+        shot_module.ShotSpan(shot_id=f"s{i}", asset_id=asset.asset_id, start_s=i, end_s=i + 1)
+        for i in range(3)
+    ]
+    flags = [
+        QualityFlags(sharpness=50, exposure_clip=0, shake=0, warnings=["kept_for_audio"]),
+        QualityFlags(sharpness=50, exposure_clip=0, shake=0),
+        QualityFlags(sharpness=0, exposure_clip=1, shake=0, rejected=True),
+    ]
+    monkeypatch.setattr("vlogcut.analyze.detect_shots", lambda *args: spans)
+    monkeypatch.setattr(quality, "measure_shot", lambda asset, span, params: int(span.start_s))
+    monkeypatch.setattr(quality, "assess", lambda index, params: flags[index])
+    monkeypatch.setattr(pauses, "analyze_pauses", lambda *args: [])
+    shots = pipeline.analyze([asset], tmp_path, workers=workers)
+    assert [shot.kind for shot in shots] == ["talking", "broll", None]
+
+    cache_path = tmp_path / "shots" / f"{asset.asset_id}.quality.json"
+    cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    for shot in cache["shots"]:
+        del shot["kind"]
+    cache_path.write_text(json.dumps(cache), encoding="utf-8")
+    legacy_bytes = cache_path.read_bytes()
+    monkeypatch.setattr(quality, "measure_shot", lambda *args: pytest.fail("re-analyzed media"))
+    assert pipeline.analyze([asset], tmp_path, workers=workers) == shots
+    assert cache_path.read_bytes() == legacy_bytes
+
+    # An explicit cached kind takes precedence even when the legacy flag disagrees.
+    cache["shots"][0]["kind"] = "broll"
+    cache_path.write_text(json.dumps(cache), encoding="utf-8")
+    assert pipeline.analyze([asset], tmp_path, workers=workers)[0].kind == "broll"
+
+
 @pytest.mark.parametrize("planner", ["rules", "llm"])
 def test_ranker_scores_all_shots_after_captioning_and_reaches_rules(
     tmp_path: Path,

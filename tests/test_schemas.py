@@ -46,6 +46,30 @@ def test_old_shot_json_defaults_to_independent_empty_cut_points() -> None:
     first, second = Shot.model_validate_json(payload), Shot.model_validate_json(payload)
     assert first.cut_points == second.cut_points == []
     assert first.cut_points is not second.cut_points
+    assert first.kind is second.kind is None
+
+
+@pytest.mark.parametrize("kind", ["talking", "broll", None])
+def test_shot_kind_round_trip(kind: str | None) -> None:
+    shot = Shot.model_validate(
+        {
+            "shot_id": "s", "asset_id": "a", "start_s": 0, "end_s": 4,
+            "quality": {"sharpness": 50, "exposure_clip": 0, "shake": 0},
+            "kind": kind,
+        }
+    )  # fmt: skip
+    assert Shot.model_validate_json(shot.model_dump_json()).kind == kind
+
+
+def test_shot_kind_rejects_invalid_value() -> None:
+    with pytest.raises(ValidationError, match="kind"):
+        Shot.model_validate(
+            {
+                "shot_id": "s", "asset_id": "a", "start_s": 0, "end_s": 4,
+                "quality": {"sharpness": 50, "exposure_clip": 0, "shake": 0},
+                "kind": "montage",
+            }
+        )  # fmt: skip
 
 
 def test_shot_cut_points_round_trip_independently_of_usable_range() -> None:

@@ -136,6 +136,7 @@ def analyze(
     if caption and router is None:
         raise ValueError("caption=True requires a ModelRouter")
     from vlogcut.analyze import assess_shots, detect_shots  # heavy optional deps
+    from vlogcut.analyze.kind import classify_kind
     from vlogcut.analyze.pauses import analyze_pauses, cut_points_for_span
 
     shots: list[Shot] = []
@@ -147,6 +148,8 @@ def analyze(
         progress(f"[{i}/{len(assets)}] pauses {Path(asset.path).name}")
         midpoints = [pause.mid_s for pause in analyze_pauses(asset, workspace)]
         for shot in asset_shots:
+            # Backfill legacy quality-cache records without re-analyzing media.
+            shot.kind = classify_kind(shot)
             # Refresh even on quality-cache hits: old records have no cut points.
             shot.cut_points = cut_points_for_span(midpoints, shot.start_s, shot.end_s)
         return asset_shots

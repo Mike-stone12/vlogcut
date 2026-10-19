@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 
 import pytest
 
@@ -68,6 +69,39 @@ def _by_id(shots: list[Shot]) -> dict[str, Shot]:
 
 
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "strategy,expected",
+    [
+        ("coverage", "90dd4166fadd5d1c393363e68b0d63688ef35bb7fc6d558cb7849f98821abf80"),
+        ("highlights", "5bf72aaec4502e19047514e9f27e20b340af7ca009430793332ef2e559ee2a52"),
+    ],
+)
+def test_shot_kind_preserves_legacy_edl_bytes(strategy: str, expected: str) -> None:
+    from vlogcut.analyze.kind import classify_kind
+
+    shots, assets = _day(4)
+    shots[0].quality.warnings = ["shaky", "kept_for_audio"]
+    shots[2].quality.rejected = True
+    params = RoughCutParams(target_s=24, strategy=strategy)
+    # Digests captured from the planner before adding Shot.kind.
+    legacy = rough_cut(shots, assets, params).model_dump_json().encode()
+    assert sha256(legacy).hexdigest() == expected
+    for shot in shots:
+        shot.kind = classify_kind(shot)
+    assert rough_cut(shots, assets, params).model_dump_json().encode() == legacy
+
+
+@pytest.mark.parametrize("talking", [False, True])
+def test_explicit_kind_controls_talking_placement_and_score(talking: bool) -> None:
+    shot = _shot("a", 0, sharpness=0, warnings=[] if talking else ["kept_for_audio"])
+    shot.kind = "talking" if talking else "broll"
+    candidate = _Candidate(shot=shot, lo=0, hi=6, order=0, score=score_shot(shot))
+    assert candidate.talking is talking
+    assert score_shot(shot) == pytest.approx(0.79 if talking else 0.49)
+    edl = rough_cut([shot], [_asset("a", 0)], RoughCutParams(target_s=3))
+    assert edl.clips[0].in_s == (0 if talking else 1.5)
 
 
 @pytest.mark.parametrize(
