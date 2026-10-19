@@ -9,6 +9,7 @@ from vlogcut.schemas import (
     CutPoint,
     DurationStats,
     Feedback,
+    LookStats,
     PreferencePair,
     QualityFlags,
     Shot,
@@ -190,6 +191,7 @@ def test_style_profile_unmeasured_ratios_are_none():
     stats = DurationStats(p10=1.0, median=2.0, p90=4.0)
     profile = StyleProfile(shot_duration_s=stats, cuts_per_min=20)
     assert profile.beat_aligned_ratio is None and profile.speech_ratio is None
+    assert profile.look is None
     with pytest.raises(ValidationError):
         StyleProfile(shot_duration_s=stats, cuts_per_min=20, speech_ratio=1.5)
 
@@ -211,6 +213,44 @@ def test_old_profile_json_has_unmeasured_transitions():
     )
     assert profile.transitions is None
     assert profile.structure is None
+    assert profile.look is None
+
+
+@pytest.mark.parametrize(
+    "value", [None, {}, {"brightness": 0, "saturation": 0, "warmth": 0, "frames": 1}]
+)
+def test_profile_look_round_trip_and_legacy_empty_dict(value: object) -> None:
+    profile = StyleProfile.model_validate(
+        {"shot_duration_s": {"p10": 1, "median": 2, "p90": 4}, "cuts_per_min": 20, "look": value}
+    )
+    assert (profile.look is None) == (value is None or value == {})
+    assert StyleProfile.model_validate_json(profile.model_dump_json()) == profile
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("brightness", -0.01),
+        ("brightness", 1.01),
+        ("saturation", -0.01),
+        ("saturation", 1.01),
+        ("warmth", -1.01),
+        ("warmth", 1.01),
+        ("frames", 0),
+        ("brightness", float("nan")),
+        ("warmth", float("inf")),
+    ],
+)
+def test_look_stats_bounds(field: str, value: float) -> None:
+    with pytest.raises(ValidationError):
+        LookStats.model_validate(
+            {"brightness": 0, "saturation": 0, "warmth": 0, "frames": 1, field: value}
+        )
+
+
+@pytest.mark.parametrize("brightness,saturation,warmth", [(0, 0, -1), (1, 1, 1)])
+def test_look_stats_inclusive_bounds(brightness: float, saturation: float, warmth: float) -> None:
+    assert LookStats(brightness=brightness, saturation=saturation, warmth=warmth, frames=1)
 
 
 @pytest.mark.parametrize("share", [-0.1, 1.1])

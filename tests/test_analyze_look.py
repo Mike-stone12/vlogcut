@@ -124,6 +124,19 @@ def test_decoder_empty_output(monkeypatch: pytest.MonkeyPatch) -> None:
     assert frames.dtype == np.uint8
 
 
+def test_decoder_caps_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("numpy")
+
+    def decode(name: str, args: list[str]) -> bytes:
+        assert args[args.index("-frames:v") + 1] == "32"
+        return bytes(32 * 64 * 64 * 3)
+
+    monkeypatch.setattr(ffmpeg, "run_bytes", decode)
+    assert len(load_rgb_frames("proxy.mp4", max_frames=32)) == 32
+    with pytest.raises(ValueError, match="max_frames"):
+        load_rgb_frames("proxy.mp4", max_frames=0)
+
+
 @pytest.mark.ffmpeg
 @pytest.mark.parametrize(
     "colour,brightness,warmth_sign",

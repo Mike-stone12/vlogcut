@@ -57,6 +57,7 @@ def test_profile_from_edl_uses_timeline_durations():
     assert p.cuts_per_min == pytest.approx(30.0)  # 2 cuts in 4 s
     assert p.shot_duration_s.median == pytest.approx(1.0)
     assert p.source_refs == ["edl"]
+    assert p.look is None
     assert p.transitions == TransitionMix(hard_cut=1, dissolve=0)
     sped_up = profile_from_edl(_edl([1.0, 2.0, 1.0], speed=2.0))  # same timeline, 2x source spans
     assert sped_up.shot_duration_s == p.shot_duration_s

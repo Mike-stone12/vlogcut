@@ -126,7 +126,7 @@ def test_reference_cache_paths(
     monkeypatch.setattr(profile, "probe_asset", lambda path: _asset(path, workspace))
     monkeypatch.setattr(profile, "make_proxy", lambda asset, ws: asset)
     monkeypatch.setattr(shots, "detect_cuts", lambda *a, **kw: [2.0])
-    params = profile.ReferenceParams(dissolves=False, beats=False)
+    params = profile.ReferenceParams(dissolves=False, beats=False, look=False)
     supplied = str(source.relative_to(tmp_path) if relative_input else source)
     first = profile.analyze_reference(supplied, workspace, params)
     cache_path = workspace / "style/a.cuts.json"
