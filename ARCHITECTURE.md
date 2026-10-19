@@ -107,8 +107,9 @@ flags are skipped: references are finished edits), then aggregate:
   `music_bpm` is 60 / median of pooled positive inter-beat intervals from each
   reference's sorted beats, without bridging references. Disabled detection in any
   reference or no intervals leaves BPM unmeasured. Style show displays measured BPM;
-  style distance and `style diff` compare measured BPM in octaves. Both planners
-  and validation still ignore it.
+  style distance and `style diff` compare measured BPM in octaves. The LLM prompt
+  describes measured BPM and its beat period as guidance for clip lengths near
+  whole beat multiples when they fit. The rules planner and validation still ignore it.
   Chosen-music beat snapping is wired as opt-in via `pipeline.cut(music=...)`.
   The profile energy curve remains planned
 - Structure ("grammar"): montage bursts are now measured as the share of shots in
@@ -230,10 +231,17 @@ for it, it is not explainable, and it would break principle 2.
   `ModelRouter` with the `planner` role, plus a bounded repair loop feeding parse
   errors and hard-check violations back into the same conversation. Initial style
   guidance describes measured `montage_share`, `intro_pace_ratio`, `kind_alternation`
-  and `speech_ratio`, plus the cold-open allowance. Measured speech ratio, including
-  zero, adds one line with two decimal places targeting roughly that share of
-  timeline duration from talking clips and the rest from b-roll, even without
-  structure data. `None` preserves prompt bytes; repair rounds do not repeat the line.
+  and `speech_ratio`, plus measured `music_bpm` and the cold-open allowance.
+  Measured speech ratio, including zero, adds one line with two decimal places
+  targeting roughly that share of timeline duration from talking clips and the rest
+  from b-roll, even without structure data. `None` preserves prompt bytes; repair
+  rounds do not repeat the line.
+  Measured reference BPM adds one guidance line after speech ratio: tempo with one
+  decimal place and beat period (60 / BPM) in seconds with two decimals. It describes
+  the reference creator's cuts as following this tempo and prefers clip lengths near
+  whole beat multiples when they fit. No profile or `music_bpm=None` preserves prompt
+  bytes; repair rounds reuse the line without repeating it. The rules planner and
+  validation still ignore BPM; chosen-music beat snapping is unchanged.
   The LLM planner and repair loop are opt-in via `pipeline.cut(planner="llm", router=...)` or
   `vlogcut cut --planner llm`; the rules planner stays the default. The CLI reads
   `--config` (default `config.yaml`) for LLM planning or `--caption`, sharing one
@@ -395,10 +403,13 @@ values are omitted from serialization using the same wrap-serializer convention 
 `StructureStats.kind_alternation`, preserving existing profile JSON bytes. Measured
 values round-trip and appear in `style show` with one decimal place. Style distance
 uses `|log2(a / b)|` when both profiles measure BPM, with equal weight in the total;
-`style diff` displays one-decimal BPM values and their octave delta. Both planners
-and validation still ignore `music_bpm`. A missing BPM skips this dimension; a
-one-sided measurement is listed in `unmeasured`, while both sides `None` preserve
-the previous distance and diff output exactly.
+`style diff` displays one-decimal BPM values and their octave delta. The initial LLM
+prompt describes measured BPM (one decimal) and beat period (60 / BPM, two decimals
+in seconds) as guidance to prefer clip lengths near whole beat multiples when they
+fit. Unmeasured BPM adds no line; repair rounds do not repeat it. The rules planner
+and validation still ignore `music_bpm`. For style distance, a missing BPM skips
+this dimension; a one-sided measurement is listed in `unmeasured`, while both sides
+`None` preserve the previous distance and diff output exactly.
 
 `StyleProfile.speech_ratio` is measured by `profile_from_edl(..., shots=...)`:
 map each clip's shot ID through `analyze/kind.classify_kind`, then divide the total
@@ -740,6 +751,14 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: reference music tempo guidance — the initial LLM prompt adds one line
+  after speech-ratio guidance for measured `music_bpm`, giving one-decimal BPM and
+  two-decimal beat seconds (60 / BPM). Describe the creator's cuts as following this
+  tempo and prefer whole-beat clip lengths when they fit, without a hard rule.
+  No profile or unmeasured BPM preserves prompt bytes; repair rounds reuse the
+  conversation. Rules planning, validation, beat snapping, schemas, measurement
+  and CLI are unchanged.
 
 - 2026-10-19: music tempo distance uses `|log2(a / b)|` with equal weight when
   both profiles measure `music_bpm`. Double/half-speed tempo octave errors read as
