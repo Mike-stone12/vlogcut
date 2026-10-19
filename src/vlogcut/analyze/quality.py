@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field, ValidationError
 
+from vlogcut.analyze.motion_cuts import camera_motion_cut_points
 from vlogcut.analyze.pauses import _load_mono_pcm
 from vlogcut.analyze.shots import ShotSpan
 from vlogcut.ingest import ffmpeg
@@ -298,6 +299,7 @@ class QualityCache(BaseModel):
     params: QualityParams
     spans: list[tuple[str, float, float]]
     shots: list[Shot]
+    motion_cuts: bool = False
 
 
 def measure_shot(asset: MediaAsset, span: ShotSpan, params: QualityParams) -> ShotMetrics:
@@ -338,6 +340,8 @@ def assess_shots(
     spans: list[ShotSpan],
     workspace: str | Path,
     params: QualityParams | None = None,
+    *,
+    motion_cuts: bool = False,
 ) -> list[Shot]:
     """Measure every span and return full `Shot` records (cached per asset)."""
     params = params or QualityParams()
@@ -346,7 +350,7 @@ def assess_shots(
     if cache_path.is_file():
         try:
             cache = QualityCache.model_validate_json(cache_path.read_text(encoding="utf-8"))
-            if cache.params == params and cache.spans == key:
+            if cache.params == params and cache.spans == key and cache.motion_cuts == motion_cuts:
                 for shot in cache.shots:
                     shot.keyframes = [str(from_workspace(k, workspace)) for k in shot.keyframes]
                 return cache.shots
@@ -355,7 +359,8 @@ def assess_shots(
 
     shots = []
     for span in spans:
-        flags = assess(measure_shot(asset, span, params), params)
+        metrics = measure_shot(asset, span, params)
+        flags = assess(metrics, params)
         if flags.usable_range is not None:  # sampling can overshoot the shot end slightly
             lo, hi = flags.usable_range
             flags.usable_range = (lo, min(hi, span.end_s - span.start_s))
@@ -367,6 +372,11 @@ def assess_shots(
                 end_s=span.end_s,
                 keyframes=span.keyframes,
                 quality=flags,
+                cut_points=camera_motion_cut_points(
+                    metrics.motion, metrics.fps, span.start_s, span.end_s
+                )
+                if motion_cuts
+                else [],
             )
         )
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -377,7 +387,13 @@ def assess_shots(
         )
         for s in shots
     ]
-    cache = QualityCache(asset_id=asset.asset_id, params=params, spans=key, shots=stored)
-    tmp.write_text(cache.model_dump_json(indent=1), encoding="utf-8")
+    cache = QualityCache(
+        asset_id=asset.asset_id, params=params, spans=key, shots=stored, motion_cuts=motion_cuts
+    )
+    # Omit the default marker to preserve legacy cache bytes and cache hits.
+    tmp.write_text(
+        cache.model_dump_json(indent=1, exclude={"motion_cuts"} if not motion_cuts else set()),
+        encoding="utf-8",
+    )
     tmp.replace(cache_path)
     return shots

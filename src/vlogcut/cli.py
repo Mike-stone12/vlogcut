@@ -49,6 +49,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     c.add_argument("--planner", choices=["rules", "llm"], default="rules")
     c.add_argument("--caption", action="store_true", help="caption shots using the captioner role")
+    c.add_argument(
+        "--motion-cuts", action="store_true", help="add motion-minimum cut-point candidates"
+    )
     c.add_argument("--brief", help="text brief for the LLM planner")
     c.add_argument(
         "--constraints", type=Path, metavar="CONSTRAINTS_JSON",
@@ -210,7 +213,7 @@ def _cut(args: argparse.Namespace) -> int:
             music_gain_db=args.music_gain, out=args.out, render=not args.no_render,
             preview_params={"background": args.background, "subtitles": not args.no_subtitles},
             progress=progress, workers=args.jobs, cold_open=args.cold_open, constraints=constraints,
-            ranker=ranker,
+            ranker=ranker, motion_cuts=args.motion_cuts,
         )  # fmt: skip
     except FFmpegNotFoundError as exc:
         return _fail(str(exc))

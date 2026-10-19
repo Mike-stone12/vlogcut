@@ -90,9 +90,12 @@ ingest → analyze → plan → validate/repair → render/export → feedback
   tags and interest with independent tags lists. Rejected shots are excluded by
   default; ungrouped shots retain per-shot captioning.
 - Cut-point candidates: energy-based audio pauses populate `Shot.cut_points` during
-  analysis. The rules planner shifts fixed-length clips onto nearby candidates after
-  length fitting and rounding. Pure motion-minimum and candidate-merge helpers
-  exist in `analyze/motion_cuts.py`; motion pipeline wiring remains planned.
+  analysis. Motion minima are opt-in via `vlogcut cut --motion-cuts` or
+  `pipeline.cut(motion_cuts=True)`. Quality analysis reuses its phase-correlation
+  camera translations; `analyze/motion_cuts.py` converts their magnitudes to absolute
+  source times and merges them with pauses, sorted and unique strictly inside each
+  shot. The rules planner shifts fixed-length clips onto nearby candidates after
+  length fitting and rounding. Omitting the flag preserves pause-only analysis.
   Beats of the chosen music as cut candidates and LLM planner use remain planned
 - Output: `Shot` records, cached in `workspace/<project>/`. Per-asset work is
   independent; `pipeline.py` can run it in a thread pool via `workers` / `--jobs`
@@ -753,6 +756,19 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: opt-in motion-cut wiring — `pipeline.analyze`, `pipeline.cut` and
+  `assess_shots` default to `motion_cuts=False`; CLI `cut --motion-cuts` enables it.
+  Reuse quality analysis's tile-median phase-correlation (dy, dx) steps at proxy
+  fps, taking Euclidean magnitudes. Assign each step to its destination frame and
+  extend the first magnitude back to frame zero without introducing a minimum.
+  The existing minimum finder enforces strict interior margins; the existing merge
+  helper prefers pauses within 100 ms and sorts/deduplicates candidates. Quality
+  caches store motion candidates and compare a `motion_cuts` marker alongside
+  params and spans. The marker defaults to false when absent and is omitted when
+  writing default caches, preserving legacy params, keys and bytes. Toggling the
+  flag invalidates the quality cache; shot detection and pause caches are unchanged.
+  No extra decoding on fresh analysis, dependencies or schema/planner changes.
 
 - 2026-10-19: motion-minimum cut helpers — `analyze/motion_cuts.py` uses pure
   Python over supplied nonnegative motion samples. Defaults: `min_gap_s=0.5`,

@@ -1,4 +1,4 @@
-"""Pure cut candidates from sampled camera motion; no video decoding or pipeline wiring."""
+"""Pure cut candidates from sampled camera motion; no video decoding."""
 
 from __future__ import annotations
 
@@ -8,6 +8,19 @@ from collections.abc import Sequence
 from statistics import median
 
 from vlogcut.schemas import CutPoint
+
+
+def camera_motion_cut_points(
+    motion: Sequence[tuple[float, float]], sample_fps: float, start_s: float, end_s: float
+) -> list[CutPoint]:
+    """Convert per-step (dy, dx) translations into absolute-time candidates.
+
+    Assign each step's magnitude to its destination frame, at (i + 1) / fps.
+    Extend the first magnitude back to frame zero so it cannot create a minimum.
+    This reuses the quality analyzer's phase-correlation signal without decoding.
+    """
+    levels = [math.hypot(dy, dx) for dy, dx in motion]
+    return motion_cut_points(levels[:1] + levels, sample_fps, start_s, end_s)
 
 
 def motion_cut_points(
