@@ -254,6 +254,8 @@ def cut(
     if caption and router is None:
         raise ValueError("caption=True requires a ModelRouter")
     workspace = Path(workspace)
+    if music is not None and not music.is_file():
+        raise FileNotFoundError(f"music file does not exist or is not a file: {music}")
     # read the profile first: a bad file should fail before minutes of analysis
     profile = load_profile(style) if style is not None else None
     if cold_open:
@@ -294,6 +296,22 @@ def cut(
     if style is not None and profile is not None:
         edl.notes += f"; style {style.name}: {profile.notes}"  # an EDL says what paced it
     if music is not None:
+        from vlogcut.plan.snap import snap_to_beats
+
+        try:
+            from vlogcut.analyze.beats import BeatParams, detect_beats
+            from vlogcut.analyze.pauses import load_mono_audio
+
+            sample_rate = BeatParams().sample_rate
+            samples = load_mono_audio(music, sample_rate)
+            beats = detect_beats(samples, sample_rate).beats if samples is not None else []
+        except ImportError as exc:
+            raise ImportError('music beat detection needs: pip install -e ".[analyze]"') from exc
+        if beats:
+            # User music starts at timeline zero, so no beat-time offset is needed.
+            edl = snap_to_beats(edl, shots, beats)
+        else:
+            log.warning("No beats detected in %s; leaving EDL unsnapped", music)
         edl.music = [MusicCue(track_id="music", gain_db=music_gain_db)]
     # outputs with and without a style sit side by side (the run manifest replaces this)
     name = f"{strategy}_{target_s:.0f}s" + (f"_{style.stem}" if style else "")
