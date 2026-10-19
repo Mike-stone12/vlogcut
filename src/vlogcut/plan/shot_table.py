@@ -1,5 +1,9 @@
 """Deterministic planner input: tab-separated columns, one line per shot.
 
+Column order: shot_id, asset_id, start_s, duration_s, usable_range_rel_s,
+warnings, dup_group, kept_for_audio, cut_points_rel_s, caption, tags, interest,
+rejected, reject_reasons. Interest is an integer when present.
+
 Empty or None values use ``-``. A None usable_range means the whole shot, so it
 is expanded to 0..duration. Times are seconds with two decimal places: start_s
 is source-absolute; usable_range and cut_points are shot-relative, like Clip
@@ -18,7 +22,7 @@ from vlogcut.schemas import Shot
 
 _HEADER = (
     "shot_id\tasset_id\tstart_s\tduration_s\tusable_range_rel_s\twarnings\tdup_group\t"
-    "kept_for_audio\tcut_points_rel_s\trejected\treject_reasons"
+    "kept_for_audio\tcut_points_rel_s\tcaption\ttags\tinterest\trejected\treject_reasons"
 )
 
 
@@ -52,6 +56,9 @@ def format_shot_table(shots: Sequence[Shot], *, include_rejected: bool = False) 
                     _text(shot.dup_group),
                     str("kept_for_audio" in quality.warnings).lower(),
                     cut_points or "-",
+                    _text(shot.caption),
+                    _text(shot.tags),
+                    str(shot.interest) if shot.interest is not None else "-",
                     str(quality.rejected).lower(),
                     _text(quality.reject_reasons),
                 )

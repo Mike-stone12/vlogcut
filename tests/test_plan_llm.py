@@ -97,6 +97,7 @@ def test_messages_are_deterministic_and_include_filtered_table(shots: list[Shot]
     messages = build_planner_messages(shots, target_s=10)
     assert messages == build_planner_messages(shots, target_s=10)
     assert [m["role"] for m in messages] == ["system", "user"]
+    assert "caption, tags and interest (1–5)" in messages[0]["content"]
     user = messages[1]["content"]
     assert format_shot_table(shots) in user
     assert '"s1"' in user and '"s2"' in user

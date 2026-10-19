@@ -80,7 +80,8 @@ ingest → analyze → plan → validate/repair → render/export → feedback
   The core and cached batch layer exist in `analyze/caption.py` via `ModelRouter`,
   with rejected-shot filtering and caching (model name in the cache key).
   Pipeline/CLI wiring exists as opt-in `--caption`, populating `Shot.caption`,
-  `tags` and `interest`. Dedup filtering and planner/shot-table use remain planned
+  `tags` and `interest`, now exposed to the LLM planner in the shot table.
+  Dedup filtering remains planned
 - Cut-point candidates: energy-based audio pauses populate `Shot.cut_points` during
   analysis. The rules planner shifts fixed-length clips onto nearby candidates after
   length fitting and rounding. Beats of the chosen music, motion minima and LLM
@@ -388,6 +389,7 @@ unrelated footage in a way viewers recognise. Protocol:
 - [x] Week 4 · plan: LLM repair loop feeding violations back to the planner (plan/llm.py)
 - [x] Week 4 · plan: LLM planner core, prompt + EDL parsing via ModelRouter (plan/llm.py)
 - [x] Week 4 · plan: shot table as planner input text (plan/shot_table.py)
+- [x] Week 4 · plan: caption, tags and interest in the planner shot table (plan/shot_table.py)
 - [x] Week 4 · plan: rules planner avoids back-to-back dup_group clips (plan/rules.py)
 - [x] Week 4 · validate: deterministic repair wired into pipeline.cut after checks (pipeline.py, cli.py)
 - [x] Week 4 · validate: deterministic repair helper for unknown/rejected clips and transitions (validate/repair.py)
@@ -852,8 +854,8 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   whole shot; other empty values use `-`. Tab-separated rows JSON-escape text and
   retain input shot/list order. Rejected shots are omitted by default, with a final
   omitted-count summary; include_rejected=True includes them with their reasons.
-  Kind / caption / ranker score columns will be added when those fields exist as
-  populated planner inputs (the schema already has an optional caption placeholder).
+  Caption, tags and interest columns now exist before rejection status and reasons.
+  Kind and ranker score columns remain planned until populated planner inputs exist.
 
 - 2026-11-04: LLM planner core — `plan/llm.py` builds deterministic system/user
   messages with hard checks, candidate-based cut-point and usable-range preferences,
@@ -1085,6 +1087,12 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   and violations output bytes. Rules planning ignores captions; planner prompts
   and shot tables are unchanged. No schema changes, new dependencies, dedup
   filtering, ranker or privacy enforcement.
+
+- 2026-11-13: planner caption metadata — `plan/shot_table.py` exposes Shot.caption,
+  tags and interest before rejection status and reasons. Caption text and ordered
+  tags use the existing JSON escaping; interest is an integer and missing values
+  use `-`. The LLM prompt briefly describes these columns. Rejected-shot omission,
+  the summary and deterministic input order are unchanged; no schema changes.
 
 ## Open questions
 
