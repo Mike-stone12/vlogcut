@@ -188,7 +188,10 @@ explainable, and it would break principle 2.
   (highlights vs. coverage), music choice, cold open on / off
 - Presentation: the CLI writes a local HTML page with the previews side by side and
   pick / reject buttons that save a feedback JSON (no server). The static page
-  generator and JSON loader exist in `feedback/page.py`; CLI wiring remains planned.
+  generator and JSON loader in `feedback/page.py` are wired through
+  `vlogcut feedback page PREVIEW [PREVIEW ...] [-o variants.html]`.
+  `vlogcut feedback pairs FEEDBACK_JSON [--context TEXT] [-o pairs.json]` derives
+  preference-pair JSON for storage or stdout.
 - Feedback (pick / reject / free text) → **feedback** role first *classifies* it:
   "the café part was too short" is about this edit and becomes a re-plan constraint;
   "too fast overall" is about style and becomes a validated `StyleProfile` delta.
@@ -219,7 +222,8 @@ file stem, such as `coverage_180s_fast`, until the `Run` manifest exists.
 stripping whitespace, and `chosen != rejected`. Supplied strings are preserved.
 The static variants page downloads a JSON array of `Feedback` records, validated by
 `feedback.load_feedback` and ready for `feedback.preference_pairs`. Preference-pair
-persistence and downstream consumers remain planned.
+persistence is available through `vlogcut feedback pairs -o`; downstream consumers
+remain planned.
 
 `Shot.cut_points` holds code-proposed `CutPoint(time_s, kind)` candidates at absolute
 source-asset times, on the same timeline as `Shot.start_s` and `end_s`. Times must be
@@ -329,6 +333,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 5 · feedback: CLI page + pairs subcommands (cli.py)
 - [x] Week 5 · feedback: static variants page + feedback JSON loader (feedback/page.py)
 - [x] Week 5 · feedback: Feedback / PreferencePair contracts and pair derivation (schemas.py, feedback/pairs.py)
 - [x] Week 4 · pipeline: optional thread pool for per-asset analysis (pipeline.py, cli.py)
@@ -886,6 +891,22 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   directly. Invalid JSON, non-array roots and invalid records raise a single-line
   `ValueError` naming the file. No schema changes, CLI/pipeline wiring, multi-variant
   generation, Run manifest, pair persistence, feedback classification or ranker yet.
+
+- 2026-11-10: feedback CLI — argparse `feedback page` and `feedback pairs` reuse
+  the existing page writer, feedback loader and pair derivation. Page variant IDs
+  are preview file stems with one leading `preview_` removed, matching EDL stems
+  until the Run manifest exists. Preview hrefs are relative to the output HTML
+  directory, use POSIX separators and percent-encoding with `/` preserved. Page
+  output defaults to `variants.html` in the current directory, is written atomically,
+  and reports its path and variant count. Pairs preserve the helper's order and use
+  `--context` (empty by default); output is a UTF-8 JSON array of model records with
+  indent 1. With `-o`, replace the destination atomically via a same-directory
+  temporary file, cleaning up on failure, and print the path/count to stdout.
+  Without `-o`, stdout contains only JSON and stderr receives the count. Missing
+  previews, duplicate IDs, missing/invalid feedback, conflicting verdicts and I/O
+  errors produce one line through `_fail` and exit 1; success exits 0. Empty input
+  or absent picks/rejects yields `[]`. No schema or pipeline changes, multi-variant
+  generation, Run manifest, feedback classification or ranker wiring.
 
 ## Open questions
 
