@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from vlogcut import pipeline
+from vlogcut import pipeline, plan
 from vlogcut.analyze import pauses, quality
 from vlogcut.analyze import shots as shot_module
 from vlogcut.ingest import ProbeError
@@ -75,6 +75,124 @@ def _edl(shot_id: str = "s") -> EDL:
         variant_id="test", target_duration_s=1,
         clips=[Clip(shot_id=shot_id, in_s=0, out_s=1)],
     )  # fmt: skip
+
+
+@pytest.mark.parametrize("planner", ["rules", "llm"])
+@pytest.mark.parametrize("cold_open", [None, False, True])
+def test_cut_forwards_cold_open_to_rules_and_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_analysis: None,
+    caplog: pytest.LogCaptureFixture,
+    planner: str,
+    cold_open: bool | None,
+) -> None:
+    shots = [
+        _shots()[0].model_copy(update={"shot_id": f"s{i}", "start_s": i * 3, "end_s": (i + 1) * 3})
+        for i in range(3)
+    ]
+    monkeypatch.setattr(pipeline, "analyze", lambda *args: shots)
+    style = tmp_path / "style.json"
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1, median=1, p90=1),
+        cuts_per_min=60,
+        cold_open_clips=1,
+    )
+    style.write_text(profile.model_dump_json(), encoding="utf-8")
+    rough_cut = plan.rough_cut
+
+    def legacy_cut(*args: Any, **kwargs: Any) -> EDL:
+        return rough_cut(*args)  # previous pipeline call, without the new keyword
+
+    monkeypatch.setattr(plan, "rough_cut", legacy_cut)
+    baseline = pipeline.cut(tmp_path, tmp_path, target_s=3, style=style, render=False)
+    paths = [
+        baseline.edl_path, baseline.edl_path.with_suffix(".violations.json"),
+        tmp_path / "shots.json",
+    ]  # fmt: skip
+    before = [path.read_bytes() for path in paths]
+    forwarded: list[bool] = []
+
+    def spy(*args: Any, **kwargs: Any) -> EDL:
+        forwarded.append(kwargs["cold_open"])
+        return rough_cut(*args, **kwargs)
+
+    monkeypatch.setattr(plan, "rough_cut", spy)
+    client = FakeClient(["not JSON"] * 3)
+    options = {} if cold_open is None else {"cold_open": cold_open}
+    result = pipeline.cut(
+        tmp_path, tmp_path, target_s=3, style=style, render=False,
+        planner=planner, router=_router(tmp_path, client), **options,
+    )  # fmt: skip
+    assert forwarded == [cold_open is True]
+    assert result.planner == "rules" and result.fallback == (planner == "llm")
+    assert result.violations == [] and not result.repaired
+    assert result.edl_path == baseline.edl_path
+    if cold_open:
+        assert result.edl.clips[0].shot_id != baseline.edl.clips[0].shot_id
+    else:
+        assert [path.read_bytes() for path in paths] == before
+    warnings = [r for r in caplog.records if "ignores cold_open" in r.message]
+    assert len(warnings) == int(cold_open is True and planner == "llm")
+
+
+@pytest.mark.parametrize("allowance", [None, 0])
+def test_cut_warns_for_zero_cold_open_allowance(
+    tmp_path: Path,
+    stub_analysis: None,
+    caplog: pytest.LogCaptureFixture,
+    allowance: int | None,
+) -> None:
+    style = None
+    if allowance is not None:
+        style = tmp_path / "style.json"
+        profile = StyleProfile(
+            shot_duration_s=DurationStats(p10=1, median=3, p90=5),
+            cuts_per_min=20,
+            cold_open_clips=allowance,
+        )
+        style.write_text(profile.model_dump_json(), encoding="utf-8")
+    baseline = pipeline.cut(tmp_path, tmp_path, target_s=3, style=style, render=False)
+    assert caplog.records == []
+    result = pipeline.cut(tmp_path, tmp_path, target_s=3, style=style, render=False, cold_open=True)
+    assert result.edl == baseline.edl and result.violations == []
+    assert [(r.levelname, r.message) for r in caplog.records] == [
+        ("WARNING", "Cold-open allowance is 0; no cold open is produced")
+    ]
+
+
+def test_cut_llm_ignores_cold_open_without_changing_prompt(
+    tmp_path: Path, stub_analysis: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    style = tmp_path / "style.json"
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1, median=1, p90=1),
+        cuts_per_min=60,
+        cold_open_clips=1,
+    )
+    style.write_text(profile.model_dump_json(), encoding="utf-8")
+    clients = []
+    results = []
+    for cold_open in (False, True):
+        client = FakeClient(["not JSON", _edl().model_dump_json()])
+        clients.append(client)
+        results.append(
+            pipeline.cut(
+                tmp_path,
+                tmp_path,
+                target_s=1,
+                style=style,
+                render=False,
+                planner="llm",
+                router=_router(tmp_path, client),
+                cold_open=cold_open,
+            )  # fmt: skip
+        )
+    assert results[0] == results[1]
+    assert results[1].planner == "llm" and results[1].repair_rounds == 1
+    assert clients[0].requests == clients[1].requests
+    warnings = [r for r in caplog.records if "ignores cold_open" in r.message]
+    assert len(warnings) == 1 and warnings[0].levelname == "WARNING"
 
 
 def _assets() -> list[MediaAsset]:
@@ -410,7 +528,7 @@ def test_cut_validates_with_requested_target_and_style_before_render(
     monkeypatch.setattr(pipeline, "find_footage", lambda folder: [Path(asset.path)])
     monkeypatch.setattr(pipeline, "ingest", lambda *args: ([asset], []))
     monkeypatch.setattr(pipeline, "analyze", lambda *args: shots)
-    monkeypatch.setattr("vlogcut.plan.rough_cut", lambda *args: edl)
+    monkeypatch.setattr("vlogcut.plan.rough_cut", lambda *args, **kwargs: edl)
     monkeypatch.setattr(pipeline, "repair_edl", lambda *args: pytest.fail("unexpected repair"))
     profile = StyleProfile(shot_duration_s=DurationStats(p10=2, median=3, p90=4), cuts_per_min=20)
     style = tmp_path / "fast.json" if styled else None
@@ -475,7 +593,7 @@ def test_cut_repair_updates_files_and_preview(
     monkeypatch.setattr(pipeline, "find_footage", lambda folder: [Path(asset.path)])
     monkeypatch.setattr(pipeline, "ingest", lambda *args: ([asset], []))
     monkeypatch.setattr(pipeline, "analyze", lambda *args: shots)
-    monkeypatch.setattr("vlogcut.plan.rough_cut", lambda *args: edl)
+    monkeypatch.setattr("vlogcut.plan.rough_cut", lambda *args, **kwargs: edl)
     if case == "clean":
         monkeypatch.setattr(
             pipeline, "repair_edl", lambda *args: pytest.fail("clean EDL must bypass repair")
