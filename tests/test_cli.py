@@ -467,6 +467,27 @@ def test_style_diff_measured_look(tmp_path: Path, capsys: pytest.CaptureFixture)
     assert ["warmth", "-0.20", "0.20", "0.20"] in rows
 
 
+@pytest.mark.parametrize("value", [None, 120.0, 123.456])
+def test_style_show_music_bpm_and_diff_unchanged(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], value: float | None
+) -> None:
+    path = _write_profile(tmp_path / "tempo.json", 1, 2, 4, 20)
+    other = _write_profile(tmp_path / "other.json", 1, 2, 4, 20)
+    assert cli.main(["style", "diff", str(path), str(other)]) == 0
+    baseline_diff = capsys.readouterr().out
+    profile = json.loads(path.read_text(encoding="utf-8"))
+    profile["music_bpm"] = value
+    path.write_text(json.dumps(profile), encoding="utf-8")
+    assert cli.main(["style", "show", str(path)]) == 0
+    rows = [line.split() for line in capsys.readouterr().out.splitlines()]
+    if value is None:
+        assert not any(row[:2] == ["music", "BPM"] for row in rows)
+    else:
+        assert ["music", "BPM", f"{value:.1f}"] in rows
+    assert cli.main(["style", "diff", str(path), str(other)]) == 0
+    assert capsys.readouterr().out == baseline_diff
+
+
 def test_style_show_measured_transitions(tmp_path, capsys):
     path = _write_profile(tmp_path / "mix.json", 1, 2, 4, 20)
     profile = json.loads(path.read_text(encoding="utf-8"))
