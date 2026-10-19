@@ -27,6 +27,7 @@ from vlogcut.style.profile import (
     montage_share,
     pooled_beat_ratio,
     pooled_bpm,
+    pooled_energy_curve,
     shot_durations,
     transition_mix,
 )
@@ -54,6 +55,60 @@ def test_pooled_bpm(beat_lists: list[list[float]], expected: float | None) -> No
     original = [beats[:] for beats in beat_lists]
     assert pooled_bpm(beat_lists) == expected
     assert beat_lists == original
+
+
+def test_aggregate_energy_curve_weights_duration_and_skips_unmeasured() -> None:
+    a, b, missing = [
+        _ref(name, duration, [10]) for name, duration in [("a", 60), ("b", 120), ("missing", 600)]
+    ]
+    a.energy_curve = [0.0, 1.0] * 5
+    b.energy_curve = [1.0, 0.0] * 5
+    assert aggregate([a, b, missing], ReferenceParams()).energy_curve == [0.666667, 0.333333] * 5
+    assert aggregate([missing], ReferenceParams()).energy_curve is None
+    assert pooled_energy_curve([]) is None
+    assert aggregate([a, b], ReferenceParams(beats=False)).energy_curve is None
+    b.params.beats = False
+    assert aggregate([a, b], ReferenceParams()).energy_curve is None
+
+
+@pytest.mark.parametrize("audio", ["measured", "silent", "missing", "no_track", "disabled"])
+def test_reference_energy_curve_decode_and_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_reference: MediaAsset, audio: str
+) -> None:
+    stub_reference.has_audio = audio != "no_track"
+    params = ReferenceParams(dissolves=False, look=False, beats=audio != "disabled")
+    samples = None if audio == "missing" else [float(audio != "silent")] * 100
+    expected = [1.0] * 10 if audio == "measured" else None
+    calls = []
+
+    def decode(path: str, sample_rate: int) -> list[float] | None:
+        assert path == stub_reference.proxy_path and sample_rate == 22050
+        calls.append(path)
+        return samples
+
+    def measure(values: list[float], sample_rate: int) -> list[float] | None:
+        assert values is samples and sample_rate == 22050
+        return expected
+
+    monkeypatch.setattr(pauses_mod, "load_mono_audio", decode)
+    monkeypatch.setattr(beats_mod, "energy_curve", measure)
+    # A curve is measured even when no beats were found.
+    monkeypatch.setattr(beats_mod, "detect_beats", lambda *a: beats_mod.BeatResult(None, []))
+    # Old caches without the curve must be recomputed when audio analysis is enabled.
+    old = _ref("a", 120, [5]).model_dump()
+    old["params"] = params.model_dump()
+    old.pop("energy_curve")
+    cache = tmp_path / "style/a.cuts.json"
+    cache.parent.mkdir()
+    cache.write_text(json.dumps(old), encoding="utf-8")
+    first = build_profile(["a.mp4"], tmp_path, params)
+    assert first.energy_curve == expected
+    assert len(calls) == (audio not in ("no_track", "disabled"))
+    if params.beats:
+        assert json.loads(cache.read_text(encoding="utf-8"))["energy_curve"] == expected
+    monkeypatch.setattr(pauses_mod, "load_mono_audio", lambda *a: pytest.fail("re-decoded"))
+    monkeypatch.setattr(shots_mod, "detect_cuts", lambda *a, **k: pytest.fail("re-detected"))
+    assert build_profile(["a.mp4"], tmp_path, params) == first
 
 
 def test_aggregate_music_bpm_pools_reference_intervals() -> None:
@@ -621,6 +676,7 @@ def test_old_beat_cache_is_recomputed_and_beats_switch_invalidates(
 
     monkeypatch.setattr(pauses_mod, "load_mono_audio", decode)
     monkeypatch.setattr(beats_mod, "detect_beats", detect)
+    monkeypatch.setattr(beats_mod, "energy_curve", lambda *a: None)
     record = analyze_reference("a.mp4", tmp_path, params)
     assert record.beats == [10, 20]
     assert ReferenceCuts.model_validate_json(

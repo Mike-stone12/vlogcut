@@ -150,6 +150,8 @@ def format_profile(name: str, profile: StyleProfile) -> str:
             rows.append(f"{_LABELS[dim]:<14}{value:>9.2f}")
     if profile.music_bpm is not None:
         rows.append(f"{'music BPM':<14}{profile.music_bpm:>9.1f}")
+    if profile.energy_curve is not None:
+        rows.append("energy curve  " + " ".join(f"{value:.2f}" for value in profile.energy_curve))
     mix = profile.transitions
     rows.append(
         "transitions   "

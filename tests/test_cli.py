@@ -530,6 +530,19 @@ def test_style_show_music_bpm_and_diff_skips_unmeasured(
         assert output.replace(", music_bpm", "") == baseline_diff
 
 
+@pytest.mark.parametrize("curve", [None, [0.0, 1.0] + [0.123456] * 8])
+def test_style_show_energy_curve(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], curve: list[float] | None
+) -> None:
+    path = _write_profile(tmp_path / "energy.json", 1, 2, 4, 20)
+    profile = json.loads(path.read_text(encoding="utf-8"))
+    profile["energy_curve"] = curve
+    path.write_text(json.dumps(profile), encoding="utf-8")
+    assert cli.main(["style", "show", str(path)]) == 0
+    lines = [line for line in capsys.readouterr().out.splitlines() if "energy curve" in line]
+    assert lines == ([] if curve is None else ["energy curve  0.00 1.00" + " 0.12" * 8])
+
+
 def test_style_show_measured_transitions(tmp_path, capsys):
     path = _write_profile(tmp_path / "mix.json", 1, 2, 4, 20)
     profile = json.loads(path.read_text(encoding="utf-8"))
