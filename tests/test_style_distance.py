@@ -56,6 +56,7 @@ def test_distance_is_zero_for_identical_and_one_octave_for_double_speed():
         "speech_ratio",
         "dissolve",
         "montage_share",
+        "kind_alternation",
         "brightness",
         "saturation",
         "warmth",
@@ -68,7 +69,7 @@ def test_ratio_dims_count_only_when_measured_on_both_sides():
     d = profile_distance(a, b)
     assert d.per_dim["beat_aligned_ratio"] == pytest.approx(0.5)
     assert d.unmeasured == [
-        "intro_pace", "speech_ratio", "dissolve", "montage_share",
+        "intro_pace", "speech_ratio", "dissolve", "montage_share", "kind_alternation",
         "brightness", "saturation", "warmth",
     ]  # fmt: skip
     assert d.total == pytest.approx(0.5 / 5)  # four pacing dims at 0 plus one ratio dim
@@ -204,9 +205,9 @@ def test_profile_from_edl_kind_alternation_uses_classifier_and_clip_order(
     assert measured.structure.intro_pace_ratio == baseline.structure.intro_pace_ratio
     assert [shot.model_dump_json() for shot in kind_shots] == original_shots
     assert edl.model_dump_json() == original_edl
-    # Measuring the dimension does not expose it in distance or style tables.
+    # A one-sided measurement is shown, but remains unmeasured in the distance.
     assert profile_distance(baseline, measured) == profile_distance(baseline, baseline)
-    assert format_profile("p", measured) == format_profile("p", baseline)
+    assert "kind_alternation" in format_profile("p", measured)
     assert format_diff("a", baseline, "b", measured, profile_distance(baseline, measured)) == (
         format_diff("a", baseline, "b", baseline, profile_distance(baseline, baseline))
     )
@@ -243,6 +244,45 @@ def test_profile_from_edl_measures_bursts_in_speed_adjusted_timeline_order() -> 
     assert profile.structure.montage_share == 3 / 7
     edl.clips[1], edl.clips[4] = edl.clips[4], edl.clips[1]
     assert profile_from_edl(edl).structure.montage_share == 0
+
+
+@pytest.mark.parametrize(("a_value", "b_value", "delta"), [(0.2, 0.7, 0.5), (0.0, 0.0, 0.0)])
+def test_kind_alternation_distance_and_diff_row(
+    a_value: float, b_value: float, delta: float
+) -> None:
+    a = _profile(1, 2, 4, 20, structure={"montage_share": 0, "kind_alternation": a_value})
+    b = _profile(1, 2, 4, 20, structure={"montage_share": 0, "kind_alternation": b_value})
+    for left, right in [(a, b), (b, a)]:
+        d = profile_distance(left, right)
+        assert d.per_dim["kind_alternation"] == pytest.approx(delta, abs=1e-9)
+        assert "kind_alternation" not in d.unmeasured
+        assert len(d.per_dim) == 6  # four pacing dims, montage and alternation
+        assert d.total == pytest.approx(delta / 6, abs=1e-9)
+    text = format_diff("a", a, "b", b, profile_distance(a, b))
+    row = next(line for line in text.splitlines() if line.startswith("kind_alternation"))
+    assert row.split() == ["kind_alternation", f"{a_value:.2f}", f"{b_value:.2f}", f"{delta:.2f}"]
+
+
+@pytest.mark.parametrize("structure", [None, {"montage_share": 0.5, "kind_alternation": None}])
+def test_kind_alternation_skips_unmeasured_on_either_side(
+    structure: dict[str, float | None] | None,
+) -> None:
+    a = _profile(1, 2, 4, 20, structure={"montage_share": 0.5})
+    b = _profile(0.5, 1, 2, 40, structure=structure)
+    baseline = profile_distance(a, b)
+    a.structure.kind_alternation = 0.7
+    for left, right in [(a, b), (b, a)]:
+        d = profile_distance(left, right)
+        assert d.per_dim == baseline.per_dim
+        assert d.total == baseline.total
+        assert "kind_alternation" not in d.per_dim
+        assert "kind_alternation" in d.unmeasured
+        lines = format_diff("a", left, "b", right, d).splitlines()
+        assert not any(line.startswith("kind_alternation") for line in lines)
+        assert "kind_alternation" in lines[-1]
+    assert "kind_alternation" not in format_profile("b", b)
+    if structure is None:
+        assert baseline.total == profile_distance(a.model_copy(update={"structure": None}), b).total
 
 
 def test_montage_distance_and_diff_row() -> None:
