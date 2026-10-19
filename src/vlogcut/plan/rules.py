@@ -7,7 +7,8 @@ Week-1 baseline and, later, the fallback when the planner's EDL cannot be repair
 3. pick shots: "coverage" = every recording (a moment of the day) gets a clip, the rest
    by how much usable footage it has, best shot per chronological bin; "highlights" =
    the k best overall, then re-sorted by time; replace adjacent duplicate-group
-   picks when a chronological, conflict-free alternative exists
+   picks when a chronological, conflict-free alternative exists; after count fitting,
+   swap eligible shots toward measured kind alternation without reordering clips
 4. sample the profile's length distribution, using its mean to choose k; assign long
    samples to shots with room, shape intro pacing and montage bursts, then fit with
    one shared offset clamped to p10..p90 and each shot's usable part; adjust k to fit
@@ -33,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from vlogcut.analyze.kind import classify_kind
 from vlogcut.schemas import EDL, Clip, DurationStats, MediaAsset, Shot, StyleProfile, Transition
+from vlogcut.style.profile import kind_alternation
 
 log = logging.getLogger(__name__)
 
@@ -413,6 +415,75 @@ def avoid_adjacent_duplicates(
     return result
 
 
+def apply_kind_alternation(
+    picked: Sequence[_Candidate],
+    eligible: Sequence[_Candidate],
+    target: float,
+    *,
+    max_length_s: float = math.inf,
+    min_total_s: float = 0.0,
+) -> list[_Candidate]:
+    """Greedily swap eligible shots without reordering or mutating the inputs.
+
+    Use classified kinds and the style measurement's unknown-pair semantics.
+    Each of at most len(picked) swaps strictly improves the absolute target gap.
+    Prefer the replacement's blended score, then source start and shot ID; for
+    the same replacement, prefer the smallest gap, then earlier positions.
+    Preserve capped capacity for the caller's fit (or existing footage shortfall).
+    """
+    result = list(picked)
+    kinds = [classify_kind(c.shot) for c in result]
+    ranked = sorted(eligible, key=lambda c: (-c.score, c.shot.start_s, c.shot.shot_id))
+    for _ in range(len(picked)):
+        current = kind_alternation(kinds)
+        if current is None:
+            break
+        selected = {c.shot.shot_id for c in result}
+        capacity = sum(min(max_length_s, c.avail) for c in result)
+        replacement: tuple[int, _Candidate] | None = None
+        for candidate in ranked:
+            best_gap = abs(current - target)
+            kind = classify_kind(candidate.shot)
+            if candidate.shot.shot_id in selected or kind is None:
+                continue
+            for i, original in enumerate(result):
+                if kind == kinds[i]:
+                    continue
+                previous = result[i - 1] if i else None
+                following = result[i + 1] if i + 1 < len(result) else None
+                if (previous is not None and candidate.order <= previous.order) or (
+                    following is not None and candidate.order >= following.order
+                ):
+                    continue
+                group = candidate.shot.dup_group
+                if group is not None and any(
+                    neighbour is not None and neighbour.shot.dup_group == group
+                    for neighbour in (previous, following)
+                ):
+                    continue
+                new_capacity = (
+                    capacity
+                    - min(max_length_s, original.avail)
+                    + min(max_length_s, candidate.avail)
+                )
+                if new_capacity < min(min_total_s, capacity):
+                    continue
+                trial = kinds.copy()
+                trial[i] = kind
+                measured = kind_alternation(trial)
+                if measured is not None and abs(measured - target) < best_gap:
+                    replacement = i, candidate
+                    best_gap = abs(measured - target)
+            if replacement is not None:
+                break
+        if replacement is None:
+            break
+        i, candidate = replacement
+        result[i] = candidate
+        kinds[i] = classify_kind(candidate.shot)
+    return result
+
+
 def select(cands: list[_Candidate], k: int, strategy: str) -> list[_Candidate]:
     """k candidates, returned in chronological order."""
     k = max(1, min(k, len(cands)))
@@ -484,6 +555,9 @@ def rough_cut(
         profile.structure.intro_pace_ratio if profile is not None and profile.structure else None
     )
     montage = profile.structure.montage_share if profile is not None and profile.structure else None
+    alternation = (
+        profile.structure.kind_alternation if profile is not None and profile.structure else None
+    )
     by_id = {a.asset_id: a for a in assets}
 
     if ranker_scores:
@@ -528,6 +602,13 @@ def rough_cut(
             k = len(picked) - 1
         else:
             break
+
+    if alternation is not None:
+        picked = apply_kind_alternation(
+            picked, cands, alternation, max_length_s=pace.p90, min_total_s=target * (1 - tol)
+        )
+        lengths = _lengths(picked, pace, target, intro_ratio, montage)
+        total = sum(lengths)
 
     clips = [
         _clip(c, length, i, len(picked), params.strategy)
