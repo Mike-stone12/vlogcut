@@ -126,6 +126,9 @@ explainable, and it would break principle 2.
   the café"), variant knobs
 - Output: `EDL`; the rules planner aligns an in- or out-point to a cut-point candidate
   when a fixed-length window fits within the usable part and the maximum shift
+- `plan/llm.py` provides deterministic prompt building and EDL parsing via
+  `ModelRouter` with the `planner` role. It is not wired into the pipeline or CLI;
+  the rules planner stays the default.
 - If the shot table is too long: two stages — pick segments, then pick shots per segment
 - `plan/rules.py` (+ ranker) is the no-model baseline and the fallback. The LLM planner
   becomes the default only once the eval shows it beats that baseline on style distance
@@ -306,6 +309,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · plan: LLM planner core, prompt + EDL parsing via ModelRouter (plan/llm.py)
 - [x] Week 4 · plan: shot table as planner input text (plan/shot_table.py)
 - [x] Week 4 · plan: rules planner avoids back-to-back dup_group clips (plan/rules.py)
 - [x] Week 4 · validate: deterministic repair wired into pipeline.cut after checks (pipeline.py, cli.py)
@@ -768,6 +772,19 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   omitted-count summary; include_rejected=True includes them with their reasons.
   Kind / caption / ranker score columns will be added when those fields exist as
   populated planner inputs (the schema already has an optional caption placeholder).
+
+- 2026-11-04: LLM planner core — `plan/llm.py` builds deterministic system/user
+  messages with hard checks, candidate-based cut-point and usable-range preferences,
+  the EDL/Clip field contract, target duration, profile pacing and measured dissolve
+  share (or no profile), optional brief (or none), and the shot table without rejected
+  shots. Table order defines chronology; table cut points and clip offsets are
+  shot-relative. One `ModelRouter.complete("planner", messages)` call returns text;
+  parsing strips whitespace and optional surrounding JSON/unlabelled Markdown fences,
+  then uses `EDL.model_validate_json`. Invalid JSON or schema failures raise a one-line
+  `PlannerError`; surrounding prose is not extracted. Semantic checks remain separate,
+  so unknown shot IDs parse and are reported by `validate/checks.py`. No retry, repair
+  loop, rules fallback, pipeline/CLI wiring or schema change. Rules remain the default;
+  the prompt establishes candidate-based selection without changing execution.
 
 ## Open questions
 
