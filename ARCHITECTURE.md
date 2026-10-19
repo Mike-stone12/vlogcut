@@ -79,7 +79,8 @@ ingest → analyze → plan → validate/repair → render/export → feedback
 - Caption: **captioner** role (VLM) on 1–3 keyframes → description, tags, interest 1–5.
   The core and cached batch layer exist in `analyze/caption.py` via `ModelRouter`,
   with rejected-shot filtering and caching (model name in the cache key).
-  Pipeline/CLI wiring and dedup filtering remain planned
+  Pipeline/CLI wiring exists as opt-in `--caption`, populating `Shot.caption`,
+  `tags` and `interest`. Dedup filtering and planner/shot-table use remain planned
 - Cut-point candidates: energy-based audio pauses populate `Shot.cut_points` during
   analysis. The rules planner shifts fixed-length clips onto nearby candidates after
   length fitting and rounding. Beats of the chosen music, motion minima and LLM
@@ -142,7 +143,8 @@ explainable, and it would break principle 2.
   errors and hard-check violations back into the same conversation. The LLM planner
   and repair loop are opt-in via `pipeline.cut(planner="llm", router=...)` or
   `vlogcut cut --planner llm`; the rules planner stays the default. The CLI reads
-  `--config` (default `config.yaml`) only for LLM planning and accepts `--brief`.
+  `--config` (default `config.yaml`) for LLM planning or `--caption`, sharing one
+  router when both are requested, and accepts `--brief`.
 - If the shot table is too long: two stages — pick segments, then pick shots per segment
 - `plan/rules.py` (+ ranker) is the no-model baseline and the fallback. The LLM planner
   becomes the default only once the eval shows it beats that baseline on style distance
@@ -374,6 +376,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · analyze: opt-in captioning wired into pipeline and CLI (pipeline.py, cli.py)
 - [x] Week 4 · analyze: captioner core via ModelRouter (analyze/caption.py)
 - [x] Week 5 · feedback: feedback-role classification into edit constraints / profile deltas (feedback/classify.py)
 - [x] Week 3 · structure: rules planner honours intro_pace_ratio (plan/rules.py)
@@ -1065,6 +1068,23 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   shots without keyframes are always skipped with a warning. Cache hits make no
   model call. Pipeline/CLI wiring, dedup filtering and privacy enforcement remain
   planned; no schema change, new dependency or thread pool.
+
+- 2026-10-19: opt-in pipeline captions — `pipeline.analyze` and `cut` accept
+  keyword-only `caption=False` and a router. Enabling captions without a router
+  fails before analysis (before ingest in `cut`). After quality and pause analysis,
+  `analyze` runs the existing `caption_shots` helper sequentially, regardless of
+  `workers`, through `ModelRouter`'s `captioner` role. The configured captioner
+  model name supplies the cache identity; the existing helper owns filtering and
+  cache semantics under `<workspace>/captions/`. Rejected shots and shots without
+  keyframes are skipped; cache hits make no new model calls. Description, tags and
+  interest populate the existing Shot fields in returned results and `shots.json`.
+  The CLI adds `--caption`, loads `--config` with `ModelRouter.from_yaml` once,
+  shares that router with `--planner llm`, and prints `captioned N shots`.
+  Missing/invalid config or missing required roles fail before analysis with a
+  one-line error and exit 1. Captioning is off by default, preserving shots, EDL
+  and violations output bytes. Rules planning ignores captions; planner prompts
+  and shot tables are unchanged. No schema changes, new dependencies, dedup
+  filtering, ranker or privacy enforcement.
 
 ## Open questions
 

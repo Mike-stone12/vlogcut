@@ -120,11 +120,19 @@ def ingest(
 
 
 def analyze(
-    assets: list[MediaAsset], workspace: Path, progress: Progress = log.info, *, workers: int = 1
+    assets: list[MediaAsset],
+    workspace: Path,
+    progress: Progress = log.info,
+    *,
+    workers: int = 1,
+    caption: bool = False,
+    router: ModelRouter | None = None,
 ) -> list[Shot]:
-    """Analyze in input order; progress callbacks must support worker threads."""
+    """Analyze in input order, then optionally caption sequentially via the router."""
     if workers < 1:
         raise ValueError("workers must be at least 1")
+    if caption and router is None:
+        raise ValueError("caption=True requires a ModelRouter")
     from vlogcut.analyze import assess_shots, detect_shots  # heavy optional deps
     from vlogcut.analyze.pauses import analyze_pauses, cut_points_for_span
 
@@ -149,6 +157,17 @@ def analyze(
             return analyze_asset(i, asset)
 
     _run_ordered(step, assets, workers, shots.extend)
+    if caption:
+        from vlogcut.analyze.caption import caption_shots
+
+        captions = caption_shots(
+            shots, router, workspace, model=router.roles["captioner"].model, progress=progress
+        )
+        for shot in shots:
+            if result := captions.get(shot.shot_id):
+                shot.caption = result.description
+                shot.tags = result.tags
+                shot.interest = result.interest
     return shots
 
 
@@ -211,6 +230,7 @@ def cut(
     style: Path | None = None,
     planner: Literal["rules", "llm"] = "rules",
     router: ModelRouter | None = None,
+    caption: bool = False,
     brief: str | None = None,
     max_repair_rounds: int = 2,
     music: Path | None = None,
@@ -230,6 +250,8 @@ def cut(
 
     if planner == "llm" and router is None:
         raise ValueError('planner="llm" requires a ModelRouter')
+    if caption and router is None:
+        raise ValueError("caption=True requires a ModelRouter")
     workspace = Path(workspace)
     # read the profile first: a bad file should fail before minutes of analysis
     profile = load_profile(style) if style is not None else None
@@ -240,7 +262,8 @@ def cut(
     assets, skipped = ingest(files, workspace, progress, **worker_options)
     if not assets:
         raise FileNotFoundError(f"none of the {len(files)} files in {folder} is usable footage")
-    shots = analyze(assets, workspace, progress, **worker_options)
+    caption_options = {"caption": True, "router": router} if caption else {}
+    shots = analyze(assets, workspace, progress, **worker_options, **caption_options)
 
     progress(
         f"plan {strategy}, target {target_s:.0f} s" + (f", style {style.name}" if style else "")
