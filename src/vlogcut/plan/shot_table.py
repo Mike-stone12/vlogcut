@@ -3,6 +3,8 @@
 Column order: shot_id, asset_id, start_s, duration_s, usable_range_rel_s,
 warnings, dup_group, kept_for_audio, cut_points_rel_s, caption, tags, interest,
 rejected, reject_reasons. Interest is an integer when present.
+With ranker_scores supplied, rank appears after interest with two decimal places:
+higher means more likely chosen, relative within this table only.
 
 Empty or None values use ``-``. A None usable_range means the whole shot, so it
 is expanded to 0..duration. Times are seconds with two decimal places: start_s
@@ -15,8 +17,9 @@ quality warning of that name. Rejected shots are omitted by default; the last
 line always reports the omitted count. No trailing newline is added.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from json import dumps
+from math import isfinite
 
 from vlogcut.schemas import Shot
 
@@ -31,11 +34,29 @@ def _text(value: str | Sequence[str] | None) -> str:
     return dumps(value, ensure_ascii=True, separators=(",", ":")) if value else "-"
 
 
-def format_shot_table(shots: Sequence[Shot], *, include_rejected: bool = False) -> str:
-    """Format existing shot metadata without changing shots or selecting clips."""
-    lines = [_HEADER]
+def format_shot_table(
+    shots: Sequence[Shot],
+    *,
+    include_rejected: bool = False,
+    ranker_scores: Mapping[str, float] | None = None,
+) -> str:
+    """Format metadata and optional precomputed scores without changing shots.
+
+    Scores for supplied shots must be finite, including omitted rejected shots.
+    Unknown score IDs are ignored; None preserves the original table format.
+    """
+    header = _HEADER
+    if ranker_scores is not None:
+        header = header.replace("\trejected\t", "\trank\trejected\t")
+    lines = [header]
     omitted = 0
     for shot in shots:
+        rank_value = "-"
+        if ranker_scores is not None and shot.shot_id in ranker_scores:
+            value = ranker_scores[shot.shot_id]
+            if not isfinite(value):
+                raise ValueError(f"Ranker score for shot {shot.shot_id!r} must be finite")
+            rank_value = f"{value:.2f}"
         quality = shot.quality
         if quality.rejected and not include_rejected:
             omitted += 1
@@ -59,6 +80,7 @@ def format_shot_table(shots: Sequence[Shot], *, include_rejected: bool = False) 
                     _text(shot.caption),
                     _text(shot.tags),
                     str(shot.interest) if shot.interest is not None else "-",
+                    *((rank_value,) if ranker_scores is not None else ()),
                     str(quality.rejected).lower(),
                     _text(quality.reject_reasons),
                 )

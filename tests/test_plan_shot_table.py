@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from vlogcut.learn.ranker import score, train_pairwise
 from vlogcut.plan import format_shot_table
 from vlogcut.schemas import CutPoint, QualityFlags, Shot
 
@@ -35,10 +36,57 @@ def test_relative_times_and_fixed_precision() -> None:
         CutPoint(time_s=12.5, kind="pause"),
     ]
 
-    assert format_shot_table([shot]) == (
-        HEADER + '\n"s1"\t"asset-full-id"\t10.00\t6.00\t1.12..5.88\t-\t-\tfalse\t'
-        "0.50:pause,2.50:pause\t-\t-\t-\tfalse\t-\nOmitted rejected shots: 0"
+    assert (
+        format_shot_table([shot], ranker_scores=None)
+        == format_shot_table([shot])
+        == (
+            HEADER + '\n"s1"\t"asset-full-id"\t10.00\t6.00\t1.12..5.88\t-\t-\tfalse\t'
+            "0.50:pause,2.50:pause\t-\t-\t-\tfalse\t-\nOmitted rejected shots: 0"
+        )
     )
+
+
+@pytest.mark.parametrize("scores", [{}, {"s1": 1.234, "s2": -2.567, "s3": 0.0}])
+def test_optional_ranker_scores(scores: dict[str, float]) -> None:
+    shots = [_shot("s1"), _shot("s2"), _shot("s3"), _shot("missing")]
+    before = [shot.model_dump() for shot in shots]
+    lines = format_shot_table(shots, ranker_scores=scores).splitlines()
+
+    assert lines[0].split("\t") == HEADER.split("\t")[:12] + ["rank"] + HEADER.split("\t")[12:]
+    rows = [line.split("\t") for line in lines[1:-1]]
+    assert [row[12] for row in rows] == (["1.23", "-2.57", "0.00", "-"] if scores else ["-"] * 4)
+    # Removing the optional column reproduces every original row and the summary.
+    without_rank = ["\t".join(line.split("\t")[:12] + line.split("\t")[13:]) for line in lines[:-1]]
+    assert "\n".join([*without_rank, lines[-1]]) == format_shot_table(shots)
+    assert [shot.model_dump() for shot in shots] == before
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("rejected", [False, True])
+def test_nonfinite_ranker_score_names_shot(value: float, rejected: bool) -> None:
+    with pytest.raises(ValueError, match="s1"):
+        format_shot_table([_shot(rejected=rejected)], ranker_scores={"s1": value})
+
+
+def test_unknown_ranker_ids_are_ignored() -> None:
+    shots = [_shot()]
+    assert format_shot_table(shots, ranker_scores={"s1": 0.5, "unknown": float("nan")}) == (
+        format_shot_table(shots, ranker_scores={"s1": 0.5})
+    )
+
+
+def test_real_ranker_scores_compose_with_shot_table() -> None:
+    chosen, skipped = _shot("chosen"), _shot("skipped")
+    chosen.interest, skipped.interest = 5, 1
+    model = train_pairwise([(chosen, skipped)])
+    shots = [skipped, chosen]
+    scores = {shot.shot_id: score(model, shot) for shot in shots}
+    assert scores[chosen.shot_id] > scores[skipped.shot_id]
+
+    rows = format_shot_table(shots, ranker_scores=scores).splitlines()[1:-1]
+    assert [row.split("\t")[12] for row in rows] == [
+        f"{scores[shot.shot_id]:.2f}" for shot in shots
+    ]
 
 
 def test_caption_tags_and_interest() -> None:
