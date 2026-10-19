@@ -190,6 +190,88 @@ def test_messages_describe_zero_montage_and_omit_unmeasured_intro(shots: list[Sh
     assert "first 20 s" not in user
 
 
+@pytest.mark.parametrize("alternation, formatted", [(0.62, "0.62"), (0.0, "0.00")])
+def test_messages_describe_measured_kind_alternation(
+    shots: list[Shot], alternation: float, formatted: str
+) -> None:
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1, median=5, p90=8),
+        cuts_per_min=12,
+        structure=StructureStats(
+            montage_share=0.3, intro_pace_ratio=0.5, kind_alternation=alternation
+        ),
+    )
+    before = profile.model_dump()
+    messages = build_planner_messages(shots, target_s=60, profile=profile)
+    line = (
+        f"Talking/b-roll alternation: {formatted} of adjacent talking/b-roll clip pairs "
+        "switch kind (1 = always alternate, 0 = long same-kind runs)."
+    )
+    assert messages[1]["content"].count(line) == 1
+    unmeasured = profile.model_copy(
+        update={"structure": StructureStats(montage_share=0.3, intro_pace_ratio=0.5)}
+    )
+    baseline = build_planner_messages(shots, target_s=60, profile=unmeasured)
+    assert messages[0] == baseline[0]
+    assert messages[1]["content"].replace(line + "\n", "") == baseline[1]["content"]
+    assert profile.model_dump() == before
+
+
+def test_unmeasured_kind_alternation_preserves_structure_prompt_bytes(shots: list[Shot]) -> None:
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1, median=5, p90=8),
+        cuts_per_min=12,
+        structure=StructureStats(montage_share=0.3, intro_pace_ratio=0.5),
+    )
+    baseline = build_planner_messages(shots, target_s=60, profile=profile)
+    explicit_none = profile.model_copy(
+        update={
+            "structure": StructureStats(
+                montage_share=0.3, intro_pace_ratio=0.5, kind_alternation=None
+            )
+        }
+    )
+    assert build_planner_messages(shots, target_s=60, profile=explicit_none) == baseline
+    expected_user = (
+        "Target duration: 60 seconds (target_s).\n"
+        "Profile pacing: p10=1.0 s / median=5.0 s / p90=8.0 s; cuts per minute=12.0."
+        " Dissolve share: not measured.\n"
+        "Montage share=0.30: aim for 0.30 of clips in montage bursts. A burst is a run "
+        "of at least three consecutive clips, each with a timeline duration strictly "
+        "shorter than half the profile median (2.50 s).\n"
+        "Intro pace ratio=0.50: clips starting in the first 20 s of the timeline "
+        "should have a median length about 0.50 times the body median "
+        "(approximately 2.50 s, using the profile median as the body estimate).\n"
+        f"Brief: none.\nShot table (chronological order):\n{format_shot_table(shots)}"
+    )
+    assert baseline[1]["content"].encode("utf-8") == expected_user.encode("utf-8")
+    assert baseline[0] == build_planner_messages(shots, target_s=60)[0]
+
+
+@pytest.mark.parametrize("parse_error", [False, True])
+def test_repair_retains_kind_alternation_once_in_conversation(
+    tmp_path: Path, shots: list[Shot], valid_json: str, parse_error: bool
+) -> None:
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1, median=5, p90=8),
+        cuts_per_min=12,
+        structure=StructureStats(montage_share=0.3, kind_alternation=0.62),
+    )
+    raw = "not JSON" if parse_error else valid_json.replace('"s2"', '"missing"')
+    router, client = make_router(tmp_path, [raw, valid_json])
+    result = plan_with_repair(router, shots, target_s=10, profile=profile)
+    assert result.rounds == 1
+    assert result.violations == []
+    assert len(client.requests) == 2
+    initial = client.requests[0]["messages"]
+    for request in client.requests:
+        messages = request["messages"]
+        assert messages[:2] == initial
+        conversation = "\n".join(message["content"] for message in messages)
+        assert conversation.count("Talking/b-roll alternation: 0.62") == 1
+    assert "Talking/b-roll alternation" not in client.requests[1]["messages"][-1]["content"]
+
+
 @pytest.mark.parametrize("structure", [None, StructureStats(montage_share=0.3)])
 def test_messages_allow_cold_open(shots: list[Shot], structure: StructureStats | None) -> None:
     profile = StyleProfile(

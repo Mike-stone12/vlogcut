@@ -113,7 +113,8 @@ flags are skipped: references are finished edits), then aggregate:
   Talking ↔ b-roll alternation is measured for EDL-derived profiles supplied with
   analyzed shots; references skip quality analysis and leave it unmeasured.
   Measured alternation contributes to style distance and appears in style show/diff;
-  planners and prompts do not use it.
+  the LLM prompt describes a measured value, including zero, as guidance, while
+  the rules planner and validation still ignore it.
   Intro length, speech ratio and cold-open measurement remain planned. Pacing alone
   reads as a speed slider; structure is what makes a cut recognisably someone's.
   Cold-open allowance is user-set. The rules planner uses the intro pacing ratio
@@ -121,7 +122,7 @@ flags are skipped: references are finished edits), then aggregate:
   to group short clips into consecutive non-talking bursts, and can produce one opt-in cold
   open with `pipeline.cut(cold_open=True)` or `vlogcut cut --cold-open` when a
   `--style` profile has `cold_open_clips > 0`. The LLM planner prompt describes
-  measured `montage_share`, `intro_pace_ratio` and the cold-open allowance;
+  measured `montage_share`, `intro_pace_ratio`, `kind_alternation` and the cold-open allowance;
   validation is unchanged.
 - Transitions: share of hard cuts / dissolves (from `analyze/transitions.py`); fades
   through black currently count as two dissolves
@@ -383,8 +384,12 @@ unknown IDs map to `None`. Reference videos skip quality analysis and leave
 alternation unmeasured. Style distance uses its absolute difference when both
 profiles measure it, including zero; otherwise it is skipped and reported as
 unmeasured. Style show displays measured values; style diff displays a row when
-both sides measure it, otherwise listing it in the unmeasured summary. Planners
-and prompts do not use this dimension.
+both sides measure it, otherwise listing it in the unmeasured summary. The LLM
+planner's initial prompt describes a measured value, including zero, with two
+decimal places as guidance on adjacent talking/b-roll pairs switching kind.
+Unmeasured alternation adds no line and preserves prompt bytes; repair rounds
+reuse the conversation without repeating the line. The rules planner and
+validation still ignore this dimension.
 
 `StyleProfile.cold_open_clips` is a non-negative, user-set integer defaulting to 0
 (no cold open), including when absent from old profile JSON. It exempts the first
@@ -623,6 +628,12 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 
 ## Decisions log
 
+- 2026-10-19: LLM planner alternation guidance — describe measured
+  `structure.kind_alternation`, including zero, with two decimal places alongside
+  the existing structure guidance in the initial prompt. Unmeasured values preserve
+  prompt bytes; repair messages do not repeat the line. Rules planning, validation,
+  deterministic repair, snapping, rendering and schemas are unchanged.
+
 - 2026-10-19: batch caption deduplication — the first member of each non-None
   `dup_group` that passes the existing rejection filter is the representative.
   Only its existing model-aware cache and captioner path are used; peers receive
@@ -662,7 +673,8 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   so an alternation-only structure cannot arise on this path. Supporting such a
   structure would require a separate change to the existing montage contract.
   Distance and style show/diff now consume alternation as described above;
-  planners and prompts still do not.
+  the LLM prompt now describes measured values as guidance, while the rules planner
+  and validation still ignore it.
 
 - 2026-10-19: Shot.kind reuses the rules planner's `kept_for_audio` heuristic;
   no new speech detector or dependency. Explicit kinds take precedence. Rejected
