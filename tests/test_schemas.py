@@ -12,6 +12,7 @@ from vlogcut.schemas import (
     PreferencePair,
     QualityFlags,
     Shot,
+    StructureStats,
     StyleProfile,
     Transition,
     TransitionMix,
@@ -209,6 +210,23 @@ def test_old_profile_json_has_unmeasured_transitions():
         '{"shot_duration_s": {"p10": 1, "median": 2, "p90": 4}, "cuts_per_min": 20}'
     )
     assert profile.transitions is None
+    assert profile.structure is None
+
+
+@pytest.mark.parametrize("share", [-0.1, 1.1])
+def test_structure_stats_rejects_invalid_share(share: float) -> None:
+    with pytest.raises(ValidationError, match="montage_share"):
+        StructureStats(montage_share=share)
+
+
+@pytest.mark.parametrize("share", [0, 0.375, 1])
+def test_style_structure_round_trip(share: float) -> None:
+    profile = StyleProfile(
+        shot_duration_s=DurationStats(p10=1, median=2, p90=4),
+        cuts_per_min=20,
+        structure=StructureStats(montage_share=share),
+    )
+    assert StyleProfile.model_validate_json(profile.model_dump_json()) == profile
 
 
 @pytest.mark.parametrize("rate", [0, -1])

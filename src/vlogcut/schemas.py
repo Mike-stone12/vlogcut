@@ -144,6 +144,12 @@ class TransitionMix(BaseModel):
         return self
 
 
+class StructureStats(BaseModel):
+    """Measured editing structure, independent of absolute pacing."""
+
+    montage_share: float = Field(ge=0, le=1)
+
+
 class StyleProfile(BaseModel):
     """Explicit, editable description of a creator's editing style."""
 
@@ -158,6 +164,7 @@ class StyleProfile(BaseModel):
     cold_open_clips: int = Field(default=0, ge=0)
     speech_ratio: float | None = Field(default=None, ge=0, le=1)  # None = not measured
     transitions: TransitionMix | None = None  # None = not measured
+    structure: StructureStats | None = None  # None = not measured
     look: dict[str, float] = Field(default_factory=dict)  # brightness, saturation, warmth...
     subtitle: SubtitleStyle = Field(default_factory=SubtitleStyle)
     notes: str = ""  # short natural-language summary

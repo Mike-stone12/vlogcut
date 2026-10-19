@@ -1,8 +1,8 @@
-"""Style profile from reference videos: pacing, transitions and beat alignment.
+"""Style profile from reference videos: pacing, structure, transitions and beats.
 
 PoC slice: the shot-duration distribution (p10 / median / p90) and cuts per minute,
-pooled over all references, plus transition mix and beat alignment. Structure and speech
-come later.
+pooled over all references, plus montage-burst share, transition mix and beat alignment.
+Other structure dimensions and speech come later.
 
 References are finished edits, so this does not reuse `analyze.detect_shots`: that step
 splits long shots into equal parts (which would destroy the duration distribution) and
@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from vlogcut.analyze import shots, transitions
 from vlogcut.ingest import make_proxy, probe_asset
-from vlogcut.schemas import DurationStats, StyleProfile, TransitionMix
+from vlogcut.schemas import DurationStats, StructureStats, StyleProfile, TransitionMix
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +88,33 @@ def shot_durations(cuts: Sequence[float], duration_s: float, min_shot_s: float) 
     return [end - start for start, end in spans]
 
 
+def montage_share(
+    per_ref: Sequence[Sequence[float]], median_s: float, rel: float = 0.5, min_run: int = 3
+) -> float | None:
+    """Pool shot counts in short-shot bursts, preserving each edit's timeline order.
+
+    Short means strictly below `rel * median_s`, using the pooled profile median.
+    Maximal runs of at least `min_run` qualify; runs never cross edit boundaries.
+    """
+    if median_s <= 0 or rel <= 0 or min_run < 2:
+        raise ValueError("median_s and rel must be positive; min_run must be at least 2")
+    threshold = rel * median_s
+    total, in_bursts = 0, 0
+    for durations in per_ref:
+        total += len(durations)
+        run = 0
+        for duration in durations:
+            if duration < threshold:
+                run += 1
+            else:
+                if run >= min_run:
+                    in_bursts += run
+                run = 0
+        if run >= min_run:
+            in_bursts += run
+    return in_bursts / total if total else None
+
+
 def duration_stats(durations: Sequence[float]) -> DurationStats:
     if len(durations) < 2:
         raise StyleError("need at least two shots (one cut) to describe pacing")
@@ -150,6 +177,7 @@ def profile_from_durations(
         raise StyleError("no cuts: need at least two shots to describe pacing")
     total_s = sum(durations)
     stats = duration_stats(durations)
+    share = montage_share(per_ref, stats.median)
     cuts_per_min = n_cuts / (total_s / 60.0)
     mix = transition_mix(n_dissolves, n_cuts)
     notes = summarize(len(per_ref), total_s, n_cuts, stats, cuts_per_min)
@@ -162,6 +190,7 @@ def profile_from_durations(
         shot_duration_s=stats,
         cuts_per_min=cuts_per_min,
         transitions=mix,
+        structure=StructureStats(montage_share=share) if share is not None else None,
         beat_aligned_ratio=beat_ratio,
         notes=notes,
     )

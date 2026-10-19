@@ -34,7 +34,7 @@ def test_distance_is_zero_for_identical_and_one_octave_for_double_speed():
     assert d.total == pytest.approx(1.0)
     assert d.per_dim == pytest.approx({"p10": 1.0, "median": 1.0, "p90": 1.0, "cuts_per_min": 1.0})
     assert profile_distance(b, a).total == pytest.approx(d.total)  # symmetric
-    assert d.unmeasured == ["beat_aligned_ratio", "speech_ratio", "dissolve"]
+    assert d.unmeasured == ["beat_aligned_ratio", "speech_ratio", "dissolve", "montage_share"]
 
 
 def test_ratio_dims_count_only_when_measured_on_both_sides():
@@ -42,7 +42,7 @@ def test_ratio_dims_count_only_when_measured_on_both_sides():
     b = _profile(1.0, 2.0, 4.0, 20.0, beat_aligned_ratio=0.3)
     d = profile_distance(a, b)
     assert d.per_dim["beat_aligned_ratio"] == pytest.approx(0.5)
-    assert d.unmeasured == ["speech_ratio", "dissolve"]
+    assert d.unmeasured == ["speech_ratio", "dissolve", "montage_share"]
     assert d.total == pytest.approx(0.5 / 5)  # four pacing dims at 0 plus one ratio dim
 
 
@@ -64,6 +64,42 @@ def test_profile_from_edl_measures_dissolves_over_boundaries():
     profile = profile_from_edl(edl)
     assert profile.transitions == TransitionMix(hard_cut=0.5, dissolve=0.5)
     assert profile.cuts_per_min == 30
+
+
+def test_profile_from_edl_measures_bursts_in_speed_adjusted_timeline_order() -> None:
+    edl = _edl([2] * 7)
+    for clip in edl.clips[:3]:
+        clip.speed = 4  # source spans are all 2 s; timeline starts with three .5 s shots
+    profile = profile_from_edl(edl)
+    assert profile.shot_duration_s.median == 2
+    assert profile.structure is not None
+    assert profile.structure.montage_share == 3 / 7
+    edl.clips[1], edl.clips[4] = edl.clips[4], edl.clips[1]
+    assert profile_from_edl(edl).structure.montage_share == 0
+
+
+def test_montage_distance_and_diff_row() -> None:
+    a = _profile(1, 2, 4, 20, structure={"montage_share": 0.2})
+    b = _profile(1, 2, 4, 20, structure={"montage_share": 0.7})
+    assert profile_distance(a, a).per_dim["montage_share"] == 0
+    for left, right in [(a, b), (b, a)]:
+        d = profile_distance(left, right)
+        assert d.per_dim["montage_share"] == pytest.approx(0.5)
+        assert d.total == pytest.approx(0.5 / 5)
+    text = format_diff("a", a, "b", b, profile_distance(a, b))
+    row = next(line for line in text.splitlines() if line.startswith("montage_share"))
+    assert row.split() == ["montage_share", "0.20", "0.70", "0.50"]
+    assert "montage_share" in format_profile("a", a)
+
+
+def test_montage_distance_skips_unmeasured_structure_on_either_side() -> None:
+    a = _profile(1, 2, 4, 20, structure={"montage_share": 0.5})
+    b = _profile(0.5, 1, 2, 40)
+    for left, right in [(a, b), (b, a)]:
+        d = profile_distance(left, right)
+        assert "montage_share" not in d.per_dim
+        assert "montage_share" in d.unmeasured
+        assert d.total == pytest.approx(1.0)  # mean over just the four pacing dimensions
 
 
 def test_tables_name_every_dimension():
