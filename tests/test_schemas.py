@@ -8,6 +8,8 @@ from vlogcut.schemas import (
     Clip,
     CutPoint,
     DurationStats,
+    Feedback,
+    PreferencePair,
     QualityFlags,
     Shot,
     StyleProfile,
@@ -185,3 +187,55 @@ def test_style_profile_requires_positive_cut_rate(rate):
     stats = DurationStats(p10=60, median=60, p90=60)
     with pytest.raises(ValidationError):
         StyleProfile(shot_duration_s=stats, cuts_per_min=rate)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"verdict": "pick"},
+        {"verdict": "reject"},
+        {"text": "  Keep more of the cafe  "},
+        {"verdict": "pick", "text": "Good pacing"},
+    ],
+)
+def test_feedback_valid_and_round_trips(fields: dict[str, str]) -> None:
+    feedback = Feedback.model_validate({"variant_id": "coverage_180s_fast", **fields})
+    assert feedback.verdict == fields.get("verdict")
+    assert feedback.text == fields.get("text", "")
+    assert Feedback.model_validate_json(feedback.model_dump_json()) == feedback
+
+
+@pytest.mark.parametrize("fields", [{}, {"text": ""}, {"text": " \t\n"}])
+def test_feedback_requires_verdict_or_text(fields: dict[str, str]) -> None:
+    with pytest.raises(ValidationError, match="verdict or non-blank text"):
+        Feedback.model_validate({"variant_id": "v", **fields})
+
+
+@pytest.mark.parametrize("variant_id", ["", " \t\n"])
+def test_feedback_rejects_blank_variant_id(variant_id: str) -> None:
+    with pytest.raises(ValidationError, match="variant_id"):
+        Feedback(variant_id=variant_id, verdict="pick")
+
+
+def test_feedback_rejects_unknown_verdict() -> None:
+    with pytest.raises(ValidationError, match="verdict"):
+        Feedback.model_validate({"variant_id": "v", "verdict": "maybe"})
+
+
+def test_preference_pair_rejects_same_variant() -> None:
+    with pytest.raises(ValidationError, match="different variants"):
+        PreferencePair(context="", chosen="v", rejected="v")
+
+
+@pytest.mark.parametrize("field", ["chosen", "rejected"])
+@pytest.mark.parametrize("variant_id", ["", " \t\n"])
+def test_preference_pair_rejects_blank_ids(field: str, variant_id: str) -> None:
+    fields = {"context": "", "chosen": "a", "rejected": "b", field: variant_id}
+    with pytest.raises(ValidationError, match="must not be blank"):
+        PreferencePair.model_validate(fields)
+
+
+@pytest.mark.parametrize("context", ["", "A day at the cafe"])
+def test_preference_pair_round_trips(context: str) -> None:
+    pair = PreferencePair(context=context, chosen="fast", rejected="slow")
+    assert PreferencePair.model_validate_json(pair.model_dump_json()) == pair

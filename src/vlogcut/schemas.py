@@ -231,3 +231,40 @@ class EDL(BaseModel):
     @property
     def total_duration_s(self) -> float:
         return sum(c.timeline_duration_s for c in self.clips)
+
+
+# ---------------------------------------------------------------------------
+# Feedback
+# ---------------------------------------------------------------------------
+
+
+class Feedback(BaseModel):
+    """A verdict or free-text feedback on one variant, identified by its EDL stem."""
+
+    variant_id: str
+    verdict: Literal["pick", "reject"] | None = None
+    text: str = ""
+
+    @model_validator(mode="after")
+    def _check_feedback(self) -> Feedback:
+        if not self.variant_id.strip():
+            raise ValueError("variant_id must not be blank")
+        if self.verdict is None and not self.text.strip():
+            raise ValueError("feedback requires a verdict or non-blank text")
+        return self
+
+
+class PreferencePair(BaseModel):
+    """A chosen variant and a rejected variant for the same project or brief."""
+
+    context: str
+    chosen: str
+    rejected: str
+
+    @model_validator(mode="after")
+    def _check_variants(self) -> PreferencePair:
+        if not self.chosen.strip() or not self.rejected.strip():
+            raise ValueError("chosen and rejected must not be blank")
+        if self.chosen == self.rejected:
+            raise ValueError("chosen and rejected must be different variants")
+        return self
