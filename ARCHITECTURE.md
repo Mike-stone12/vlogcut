@@ -127,8 +127,10 @@ explainable, and it would break principle 2.
 - Output: `EDL`; the rules planner aligns an in- or out-point to a cut-point candidate
   when a fixed-length window fits within the usable part and the maximum shift
 - `plan/llm.py` provides deterministic prompt building and EDL parsing via
-  `ModelRouter` with the `planner` role. It is not wired into the pipeline or CLI;
-  the rules planner stays the default.
+  `ModelRouter` with the `planner` role, plus a bounded repair loop feeding parse
+  errors and hard-check violations back into the same conversation. Neither the
+  LLM planner nor its repair loop is wired into the pipeline or CLI; the rules
+  planner stays the default.
 - If the shot table is too long: two stages — pick segments, then pick shots per segment
 - `plan/rules.py` (+ ranker) is the no-model baseline and the fallback. The LLM planner
   becomes the default only once the eval shows it beats that baseline on style distance
@@ -157,8 +159,10 @@ explainable, and it would break principle 2.
   rendering, so the report, `CutResult.violations` and preview reflect the final EDL.
   If all clips would be dropped, a warning is logged and the original EDL and
   violations are kept. `CutResult.repaired` and an extra CLI line report applied
-  repairs; clean EDLs are unchanged. The LLM repair loop (structured errors sent
-  back to the planner for at most N rounds) and beat snapping integration remain planned.
+  repairs; clean EDLs are unchanged. The LLM repair loop now exists separately in
+  `plan/llm.py`: structured errors are sent back to the planner for at most
+  `max_rounds` extra rounds, without calling deterministic repair. It is not wired
+  into the pipeline or CLI. Beat snapping integration remains planned.
 
 ### 6. Render / export
 - Preview mp4 (`render/preview.py`): FFmpeg on proxies (fast, low-res); cached clip
@@ -309,6 +313,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · plan: LLM repair loop feeding violations back to the planner (plan/llm.py)
 - [x] Week 4 · plan: LLM planner core, prompt + EDL parsing via ModelRouter (plan/llm.py)
 - [x] Week 4 · plan: shot table as planner input text (plan/shot_table.py)
 - [x] Week 4 · plan: rules planner avoids back-to-back dup_group clips (plan/rules.py)
@@ -785,6 +790,23 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   so unknown shot IDs parse and are reported by `validate/checks.py`. No retry, repair
   loop, rules fallback, pipeline/CLI wiring or schema change. Rules remain the default;
   the prompt establishes candidate-based selection without changing execution.
+
+- 2026-11-05: LLM repair loop — `plan/llm.plan_with_repair` uses the existing prompt
+  builder, parser and hard checks with the same shots, target and profile. Each
+  retry appends the previous raw reply as an assistant message and a user message
+  containing ordered clip-index/code/message violation lines (or the one-line
+  parse error), followed by a fixed request for complete corrected EDL JSON under
+  the same contract. All calls use `ModelRouter.complete("planner", messages)`.
+  `max_rounds` counts extra calls after the initial attempt, including parse
+  failures; zero permits one call and negative values raise `ValueError`. Each
+  round is logged. Stop at the first violation-free EDL; on exhaustion return the
+  last successfully parsed EDL with its remaining violations, even if later replies
+  failed to parse. If no reply parsed, raise `PlannerError`. `LLMPlanResult.rounds`
+  reports the repair rounds actually used (zero for a clean first reply).
+  `format_violations` preserves input order, uses `-` for absent clip indices,
+  flattens message whitespace and explicitly reports empty input. The result model
+  lives outside `schemas.py`; no schema change. No deterministic repair inside the
+  loop, rules fallback, or pipeline/CLI wiring; rules remain the default.
 
 ## Open questions
 
