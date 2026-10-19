@@ -76,6 +76,7 @@ class Shot(BaseModel):
     end_s: float
     keyframes: list[str] = Field(default_factory=list)  # image paths
     quality: QualityFlags
+    kind: Literal["talking", "broll"] | None = None  # None = not measured
     caption: str | None = None
     tags: list[str] = Field(default_factory=list)
     interest: int | None = Field(default=None, ge=1, le=5)

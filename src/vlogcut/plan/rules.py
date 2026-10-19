@@ -31,6 +31,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from vlogcut.analyze.kind import classify_kind
 from vlogcut.schemas import EDL, Clip, DurationStats, MediaAsset, Shot, StyleProfile, Transition
 
 log = logging.getLogger(__name__)
@@ -62,7 +63,7 @@ class _Candidate(BaseModel):
 
     @property
     def talking(self) -> bool:
-        return "kept_for_audio" in self.shot.quality.warnings
+        return classify_kind(self.shot) == "talking"
 
 
 def score_shot(shot: Shot) -> float:
@@ -71,7 +72,7 @@ def score_shot(shot: Shot) -> float:
     score = 0.5 + 0.2 * min(q.sharpness / 200.0, 1.0) - 0.2 * min(q.shake / 10.0, 1.0)
     soft = [w for w in q.warnings if w != "kept_for_audio"]
     score -= 0.1 * len(soft)
-    if "kept_for_audio" in q.warnings:
+    if classify_kind(shot) == "talking":
         score += 0.3  # someone talking: usually the spine of a vlog
     return max(0.0, min(1.0, score))
 
