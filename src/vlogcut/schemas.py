@@ -256,6 +256,30 @@ class MusicCue(BaseModel):
     track_id: str  # refers to a user-supplied track, never a path the model invents
     start_s: float = Field(default=0.0, ge=0)  # position on the output timeline
     gain_db: float = 0.0
+    end_s: float | None = Field(default=None, allow_inf_nan=False)
+    fade_in_s: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    fade_out_s: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _check_timing(self) -> MusicCue:
+        if self.end_s is not None:
+            if self.end_s <= self.start_s:
+                raise ValueError("music end_s must be > start_s")
+            if self.fade_in_s + self.fade_out_s > self.end_s - self.start_s:
+                raise ValueError("music fades must fit within end_s - start_s")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        # Preserve legacy EDL bytes, even when defaults were explicitly supplied.
+        data = handler(self)
+        if self.end_s is None:
+            data.pop("end_s", None)
+        if self.fade_in_s == 0:
+            data.pop("fade_in_s", None)
+        if self.fade_out_s == 0:
+            data.pop("fade_out_s", None)
+        return data
 
 
 class EDL(BaseModel):
