@@ -1088,7 +1088,7 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   and shot tables are unchanged. No schema changes, new dependencies, dedup
   filtering, ranker or privacy enforcement.
 
-- 2026-10-19: planner caption metadata — `plan/shot_table.py` exposes Shot.caption,
+- 2026-11-13: planner caption metadata — `plan/shot_table.py` exposes Shot.caption,
   tags and interest before rejection status and reasons. Caption text and ordered
   tags use the existing JSON escaping; interest is an integer and missing values
   use `-`. The LLM prompt briefly describes these columns. Rejected-shot omission,
