@@ -146,6 +146,49 @@ def fit_lengths(base: Sequence[float], lo: Sequence[float], hi: Sequence[float],
     return [min(h, max(lw, bb + t)) for bb, lw, h in zip(base, lo, hi, strict=True)]
 
 
+def place_on_cut_points(
+    lo_s: float,
+    hi_s: float,
+    length_s: float,
+    default_in_s: float,
+    candidates: Sequence[float],
+    max_shift_s: float | None = None,
+) -> float:
+    """Place a fixed-length clip using absolute source times from Shot.cut_points.
+
+    The caller supplies the absolute usable window and a feasible default in-point.
+    Only position changes, never clip length. Feasibility allows 1e-9 s tolerance.
+    Choose the smallest shift within max_shift_s, if given; ties prefer both ends
+    on candidates, then the earlier in-point. With no qualifying placement, return
+    the default unchanged. This helper is not yet wired into rough_cut.
+    """
+    tolerance = 1e-9
+    if length_s <= 0:
+        raise ValueError("length_s must be positive")
+    if hi_s - lo_s < length_s - tolerance:
+        raise ValueError("window is shorter than length_s")
+    if max_shift_s is not None and max_shift_s < 0:
+        raise ValueError("max_shift_s must be non-negative")
+
+    times = set(candidates)
+    placements = {
+        start
+        for c in times
+        for start in (c, c - length_s)
+        if lo_s - tolerance <= start and start + length_s <= hi_s + tolerance
+        if max_shift_s is None or abs(start - default_in_s) <= max_shift_s
+    }
+    return min(
+        placements,
+        key=lambda start: (
+            abs(start - default_in_s),
+            not (start in times and start + length_s in times),
+            start,
+        ),
+        default=default_in_s,
+    )
+
+
 def assign_transitions(
     lengths: Sequence[float], dissolve_share: float | None, duration_s: float = 0.5
 ) -> list[Transition]:
