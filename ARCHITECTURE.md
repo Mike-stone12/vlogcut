@@ -146,8 +146,12 @@ ties use average rank, and single or missing scores default to 0.5.
 `pipeline.cut(ranker=...)` accepts a trained `RankerModel`; `cut --ranker MODEL_JSON`
 loads and validates it before analysis. Every analyzed shot is scored after optional
 captioning, so interest is available, and scores reach rules planning (including
-LLM-failure fallback) and the LLM prompt. Draft import and deriving shot pairs
-from feedback remain planned.
+LLM-failure fallback) and the LLM prompt.
+`learn/feedback_pairs.shot_pairs_from_preferences` derives training tuples from
+variant preference pairs, EDLs keyed by file stem, and analyzed shots. It pairs
+each chosen-only shot with each rejected-only shot, excluding shared and unknown
+shots, preserving first-clip order and deduplicating ordered shot-ID pairs.
+Draft import and a CLI to train and save a `RankerModel` from feedback remain planned.
 No CLIP embedding is used yet. No end-to-end "video → edit" model: there is no data
 for it, it is not explainable, and it would break principle 2.
 
@@ -296,8 +300,9 @@ file stem, such as `coverage_180s_fast`, until the `Run` manifest exists.
 stripping whitespace, and `chosen != rejected`. Supplied strings are preserved.
 The static variants page downloads a JSON array of `Feedback` records, validated by
 `feedback.load_feedback` and ready for `feedback.preference_pairs`. Preference-pair
-persistence is available through `vlogcut feedback pairs -o`; downstream consumers
-remain planned.
+persistence is available through `vlogcut feedback pairs -o`; the pure
+`learn.shot_pairs_from_preferences` helper converts these records into ranker
+training pairs. A CLI to train and save the ranker from feedback remains planned.
 
 `Shot.cut_points` holds code-proposed `CutPoint(time_s, kind)` candidates at absolute
 source-asset times, on the same timeline as `Shot.start_s` and `end_s`. Times must be
@@ -467,6 +472,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · learn: shot pairs derived from variant preference pairs (learn/feedback_pairs.py)
 - [x] Week 4 · plan: opt-in ranker scores in cut via --ranker (pipeline.py, cli.py, plan/llm.py)
 - [x] Week 4 · plan: rules planner blends optional ranker scores (plan/rules.py)
 - [x] Week 4 · plan: optional ranker score column in the planner shot table (plan/shot_table.py)
@@ -553,6 +559,19 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: feedback-derived shot pairs — the pure
+  `learn/feedback_pairs.shot_pairs_from_preferences` looks up EDLs by variant ID
+  (file stem) and returns `(chosen Shot, skipped Shot)` tuples for `train_pairwise`.
+  Use the cross product of chosen-only and rejected-only shot IDs present in the
+  supplied shots; shared shots carry no selection signal. Missing EDLs skip the
+  preference, with one warning per missing variant ID per call. Unknown shot IDs
+  are ignored. Preserve preference order, then first-clip order on each side,
+  chosen outermost; repeated clips contribute a shot only once. Deduplicate ordered
+  shot-ID pairs across preferences, retaining both orientations when preferences
+  conflict because the ranker's loss handles the conflict. Do not filter quality-
+  rejected shots; callers decide. Inputs are unchanged. No I/O, model calls,
+  dependencies, schemas, pipeline, CLI or ranker algorithm changes.
 
 - 2026-10-19: rules planner accepts precomputed ranker scores without importing
   `vlogcut.learn`. Normalize only scored eligible candidates to [0, 1] using
