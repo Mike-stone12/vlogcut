@@ -79,9 +79,9 @@ ingest → analyze → plan → validate/repair → render/export → feedback
 - Caption: **captioner** role (VLM) on 1–3 keyframes → description, tags, interest 1–5.
   Only for shots that survive quality + dedup; the cache key includes the model name
 - Cut-point candidates: energy-based audio pauses populate `Shot.cut_points` during
-  analysis. Beats of the chosen music, motion minima and planner use remain planned;
-  planners will choose in/out among these instead of inventing times or inheriting
-  the equal 10 s split boundaries
+  analysis. The rules planner shifts fixed-length clips onto nearby candidates after
+  length fitting and rounding. Beats of the chosen music, motion minima and LLM
+  planner use remain planned
 - Output: `Shot` records, cached in `workspace/<project>/`. Per-asset work is
   independent; `pipeline.py` runs it sequentially today, a thread pool is the easy
   speed-up
@@ -122,7 +122,8 @@ explainable, and it would break principle 2.
 - Input: shot table as text (id, time, duration, kind, caption, tags, quality, ranker
   score, cut-point candidates), `StyleProfile`, user brief ("~3 min, cozy, focus on
   the café"), variant knobs
-- Output: `EDL`; in/out points are chosen among the shot's cut-point candidates
+- Output: `EDL`; the rules planner aligns an in- or out-point to a cut-point candidate
+  when a fixed-length window fits within the usable part and the maximum shift
 - If the shot table is too long: two stages — pick segments, then pick shots per segment
 - `plan/rules.py` (+ ranker) is the no-model baseline and the fallback. The LLM planner
   becomes the default only once the eval shows it beats that baseline on style distance
@@ -288,6 +289,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 3 · cut-point candidates: audio pauses → Shot.cut_points → rules planner placement (analyze/pauses.py, plan/rules.py)
 - [x] Week 1 · ingest: ffprobe metadata → `MediaAsset` (`ingest/probe.py`)
 - [x] Week 1 · ingest: low-res proxies, cached per asset (`ingest/proxy.py`)
 - [x] Week 1 · analyze: shot detection, incl. dissolves / fades (`analyze/shots.py`, `analyze/transitions.py`)
@@ -568,7 +570,8 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   `analyze/pauses.py` maps pause midpoints to sorted, deduplicated candidates with
   `start_s + margin_s < time_s < end_s - margin_s`; the default margin is 0.1 s,
   zero is allowed, and negative margins raise `ValueError`. Pipeline wiring and
-  caching are implemented; planner use remains to be done.
+  caching are implemented, as is rules planner placement (2026-10-25); LLM planner
+  use remains planned.
 
 - 2026-10-23: pause pipeline wiring — `pipeline.analyze` loads or detects pauses once
   per asset using the existing signed-PCM decoder (16 kHz mono by default), then
@@ -579,15 +582,34 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   a `.part` file followed by replace. Cut points are refreshed after loading quality
   caches, including legacy shots without candidates, so returned shots and the
   written `shots.json` use current pause results without repeating quality analysis.
-  Planner use remains pending; the week-3 cut-point milestone is still incomplete.
+  Rules planner placement completes the audio-pause cut-point path (2026-10-25).
+  Beats, motion minima and LLM planner use remain planned.
 
 - 2026-10-24: cut-point placement helper — `plan/rules.place_on_cut_points` moves a
   fixed-length clip within an absolute usable window (1e-9 s feasibility tolerance),
   aligning its in- or out-point to a `Shot.cut_points` candidate. The smallest shift
   from the default wins, subject to an optional maximum shift; ties prefer both ends
   on candidates, then the earlier in-point. If no placement qualifies, the default is
-  returned unchanged. Clip length is never changed. This helper is not wired into `rough_cut`
-  yet; existing planner output is unchanged.
+  returned unchanged. Clip length is never changed. The rules planner now uses this
+  helper after fitting and rounding (2026-10-25); its tie-breaking is unchanged.
+
+- 2026-10-25: rules planner cut-point placement — after length fitting, default
+  placement and the existing millisecond in/out rounding, `rough_cut` shifts each
+  fixed-length clip with `place_on_cut_points`. Its keyword-only `max_shift_s`
+  defaults to 1.0 s; `None` allows an unbounded shift within the usable window.
+  The helper receives absolute bounds (`Shot.start_s` plus `usable_range` offsets)
+  and candidates; EDL in/out remain shot-relative offsets. No further rounding is
+  applied, so candidate alignment is preserved to floating-point precision (with
+  the helper's 1e-9 s feasibility tolerance clamped at usable boundaries).
+  `kept_for_audio` clips also participate, starting from their usual usable-start
+  default; a clip filling the usable window has no room to move. If legacy rounding
+  makes a full-window clip longer than that window, it stays unchanged because no
+  fixed-length placement fits. Empty candidate lists retain byte-identical EDL JSON.
+  Selection, chronological order, length sampling/fitting and clip audio are unchanged;
+  rounded lengths and timeline totals are preserved to floating-point precision.
+  Transitions are assigned from the original rounded lengths before placement, so
+  their kinds and durations remain identical. Beats, motion minima and LLM planner
+  placement remain planned.
 
 ## Open questions
 
