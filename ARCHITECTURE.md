@@ -159,7 +159,8 @@ explainable, and it would break principle 2.
   a JSON list to `edl/<stem>.violations.json`, replacing any previous report even
   when empty. The CLI reports the results; violations are non-fatal and rendering
   continues. Check coverage and current limits are recorded under 2026-10-26 below.
-- Deterministic post-processing: `pipeline.cut(music=...)` decodes user music with
+- Deterministic post-processing: `pipeline.cut(music=...)`, reachable via
+  `vlogcut cut --music PATH`, decodes user music with
   the existing mono-audio loader and detects beats via `analyze/beats.detect_beats`.
   After rules or LLM planning, `plan/snap.snap_to_beats` snaps boundaries to the
   nearest beat within its default tolerance, before checks and deterministic repair.
@@ -386,6 +387,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 3 · music: --music CLI flag for beat snapping (cli.py)
 - [x] Week 3 · music: opt-in beat snapping of planned EDLs to user music (pipeline.py)
 - [x] Week 4 · analyze: opt-in captioning wired into pipeline and CLI (pipeline.py, cli.py)
 - [x] Week 4 · analyze: captioner core via ModelRouter (analyze/caption.py)
@@ -454,6 +456,14 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: music CLI — the existing `vlogcut cut --music PATH` forwards a
+  `Path` to `pipeline.cut(music=...)` for opt-in beat snapping. It combines with
+  `--style`, `--planner llm`, `--cold-open` and `--caption`; omission still passes
+  `None`, preserving the default call and EDL bytes. Missing files fail before
+  running the pipeline; dependency ImportErrors use a one-line error with the
+  existing `[analyze]` install hint. No snapping status is exposed by `CutResult`,
+  so no success summary is added. Pipeline behavior and schemas are unchanged.
 
 - 2026-10-19: opt-in music beat snapping — `pipeline.cut(music=...)` treats music
   beats as timeline times starting at 0. Snap after either planner and before checks

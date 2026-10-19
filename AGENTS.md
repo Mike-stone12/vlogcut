@@ -15,6 +15,7 @@ pip install -e ".[dev,analyze]"   # install with dev tools + analysis deps
 vlogcut cut <footage folder> -t 180   # end to end: proxies, shots, quality, rough cut, preview
 vlogcut style build <refs...> -o fast.json   # finished videos -> style profile; also show / diff
 vlogcut cut <footage folder> --style fast.json   # pace the cut from a profile
+vlogcut cut <footage folder> --music song.mp3
 vlogcut feedback page <previews...>   # local HTML; feedback pairs <feedback.json> for pairs
 pytest -q                 # tests (offline, no GPU, no API keys)
 ruff check . && ruff format --check .
