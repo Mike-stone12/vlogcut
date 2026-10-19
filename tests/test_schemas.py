@@ -12,12 +12,34 @@ from vlogcut.schemas import (
     LookStats,
     PreferencePair,
     QualityFlags,
+    Run,
+    RunInputs,
     Shot,
     StructureStats,
     StyleProfile,
     Transition,
     TransitionMix,
 )
+
+
+@pytest.mark.parametrize("preview", [None, "preview_coverage_3s.mp4"])
+def test_run_round_trip_and_input_defaults(preview: str | None) -> None:
+    fields = dict(asset_ids=["b", "a"], target_s=3, strategy="coverage", planner="rules")
+    inputs = RunInputs(**fields)
+    assert inputs.asset_ids == ["a", "b"]
+    assert inputs.brief == "" and inputs.constraints == []
+    assert not inputs.cold_open and not inputs.caption
+    assert inputs.planner_model is inputs.profile_sha256 is None
+    assert inputs.music_sha256 is inputs.ranker_sha256 is None
+    other = RunInputs(**fields)
+    inputs.constraints.append("Keep the arrival")
+    assert other.constraints == []
+    manifest = Run(
+        run_id="0123456789abcdef", inputs=inputs, variant_id="coverage_3s",
+        edl="edl/coverage_3s.json", violations="edl/coverage_3s.violations.json",
+        preview=preview,
+    )  # fmt: skip
+    assert Run.model_validate_json(manifest.model_dump_json()) == manifest
 
 
 def test_shot_duration_and_bounds():

@@ -294,6 +294,7 @@ Defined in `src/vlogcut/schemas.py`:
 | `Shot` (+ `QualityFlags`) | analyze | plan, validate, render |
 | `StyleProfile` | style | plan, validate, feedback |
 | `EDL` (+ `Clip`, `Transition`, `MusicCue`) | plan | validate, render |
+| `Run`, `RunInputs` | pipeline | run manifest (readers planned) |
 | `Feedback`, `PreferencePair` | feedback | ranker / feedback role |
 
 Changing a schema means updating this file and the tests in the same change.
@@ -301,7 +302,7 @@ Changing a schema means updating this file and the tests in the same change.
 `Feedback` records `variant_id: str`, `verdict: "pick" | "reject" | None = None`
 and free-form `text: str = ""`. The ID must be non-empty after stripping whitespace;
 at least a verdict or non-blank text is required. `variant_id` identifies an EDL
-file stem, such as `coverage_180s_fast`, until the `Run` manifest exists.
+file stem, such as `coverage_180s_fast`; run manifests do not change that identity.
 `PreferencePair` records `context: str` (project/brief description, possibly empty),
 `chosen: str` and `rejected: str` (variant IDs). Both IDs must be non-empty after
 stripping whitespace, and `chosen != rejected`. Supplied strings are preserved.
@@ -422,13 +423,36 @@ after loading without re-analysis or cache invalidation, and writes the field in
 `shots.json`. Rules scoring, length assignment and placement share this helper;
 legacy eligible shots retain identical EDL bytes. Caption refinement remains planned.
 
+`RunInputs` records sorted `asset_ids`, `target_s`, selection `strategy`, requested
+`planner` (`rules` / `llm`), and `planner_model` (configured model for LLM planning,
+otherwise `None`, even with a captioner router). LLM fallback retains the requested
+planner identity. Optional `profile_sha256` and `ranker_sha256` are full hex SHA-256
+digests of the loaded models' compact `model_dump_json()` encoded as UTF-8. This
+normalizes source JSON whitespace, key order and omitted defaults through model
+validation. `music_sha256` hashes the file bytes, streamed without decoding. Missing
+objects have `None` hashes. `brief` defaults to `""`, `constraints` to an independent
+empty list, and `cold_open` / `caption` to `False`. Constraints retain their order
+and exact strings even when ignored by rules planning.
+
+The pure `run.run_id(inputs)` returns the first 16 hex characters of SHA-256 over
+`RunInputs.model_dump_json()` encoded as UTF-8. `Run` stores that `run_id`, `inputs`,
+the EDL file stem as `variant_id`, and `edl`, `violations`, and optional `preview`
+paths (`None` when rendering is off). Workspace-internal paths are relative POSIX
+strings, following the cache convention below; explicitly external previews retain
+absolute paths. After final outputs are written, `pipeline.cut` atomically replaces
+`runs/<run_id>.json` through a `.json.part` file and returns its path as
+`CutResult.manifest`; the CLI prints it. No timestamps are included: identical
+inputs and output locations produce identical manifest bytes. Fingerprints do not
+rename or snapshot outputs, so distinct manifests can point to the same overwritten
+EDL. Rendering options and other fields outside `RunInputs` are not fingerprinted.
+
 Planned additions (remaining fields land with the module that needs them):
 
 | Field / model | Why |
 |---|---|
 | `MusicCue.end_s`, ducking params | music mixing needs an end and a level under speech |
 | `StyleProfile.structure` | exists with `montage_share`, `intro_pace_ratio` and EDL-derived `kind_alternation`; reference alternation, intro length and cold-open measurement remain planned |
-| `Run` manifest (inputs fingerprint → outputs) | EDL file names collide once profile version, brief, variant and model all vary |
+| `Run` manifest (inputs fingerprint → outputs) | exists with `RunInputs`; file names are unchanged and variant IDs remain EDL stems |
 
 Cached JSON stores paths inside the workspace as relative POSIX strings, so a moved
 workspace stays valid. External source paths stay absolute. Cache readers resolve
@@ -595,6 +619,15 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: **schema change**: add `RunInputs` and `Run` manifests, with a pure
+  16-character SHA-256 input fingerprint. Hash loaded profile/ranker model JSON
+  in UTF-8 and stream music file bytes. Write deterministic, timestamp-free manifests
+  atomically after final validation/repair and optional rendering; overwrite matching
+  run IDs and expose the path through `CutResult` and CLI. Preserve EDL, violations
+  and preview names/bytes and feedback variant IDs. Workspace-internal paths use
+  relative POSIX strings; external preview paths follow the existing cache convention.
+  This adds provenance without changing analysis caches or introducing readers.
 
 - 2026-10-19: alternation distance and display — include measured `kind_alternation`
   as an equally weighted absolute-difference dimension, including measured zero.
