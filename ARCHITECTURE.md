@@ -110,7 +110,9 @@ flags are skipped: references are finished edits), then aggregate:
   to shape clip lengths before fitting the total, uses measured `montage_share`
   to group short clips into consecutive non-talking bursts, and can produce one opt-in cold
   open with `pipeline.cut(cold_open=True)` or `vlogcut cut --cold-open` when a
-  `--style` profile has `cold_open_clips > 0`. LLM montage planning remains planned.
+  `--style` profile has `cold_open_clips > 0`. The LLM planner prompt describes
+  measured `montage_share`, `intro_pace_ratio` and the cold-open allowance;
+  validation is unchanged.
 - Transitions: share of hard cuts / dissolves (from `analyze/transitions.py`); fades
   through black currently count as two dissolves
 - Audio: speech-over-music ratio, whether clip audio is kept under music
@@ -284,7 +286,8 @@ half the profile median after shared-offset fitting where feasible. Insufficient
 room can reduce the burst count; fewer than three requested clips, p10 at or above
 half the median, or no feasible run leave planning unchanged. Missing structure,
 `montage_share` of `None`, and zero preserve the previous EDL JSON. The LLM planner
-does not yet use this dimension.
+prompt describes the measured share, including zero, and the half-median burst
+threshold in seconds; validation is unchanged.
 `None` means not measured, distinct from a measured zero; old profile JSON without
 `structure` still loads with `None`. The pure helper returns `None` for zero shots;
 profile construction retains its existing pacing errors for insufficient cuts.
@@ -297,7 +300,9 @@ Fewer than two shots in either pool yields `None`, meaning not measured. Old JSO
 with structure but without this field loads with `None`. The rules planner uses a
 measured ratio to scale intro base lengths before fitting the total, preserving
 the cap-based assignment for `kept_for_audio` clips. Unmeasured ratios leave EDL
-JSON unchanged; the LLM planner does not yet use this dimension.
+JSON unchanged. The LLM planner prompt describes the measured ratio and an
+approximate intro median in seconds, using the profile median as the body estimate;
+validation is unchanged.
 
 `StyleProfile.cold_open_clips` is a non-negative, user-set integer defaulting to 0
 (no cold open), including when absent from old profile JSON. It exempts the first
@@ -309,6 +314,10 @@ distance dimension. The rules planner can move one later hook to the front when
 requested via `pipeline.cut(cold_open=True)` or `vlogcut cut --cold-open` and this
 allowance is positive; it is off by default. Clip timing is preserved,
 the remaining clips stay chronological, and newly joined duplicate groups are avoided.
+The LLM planner prompt describes a positive allowance as at most N leading hook
+clips before the chronological remainder; validation is unchanged. Missing structure
+dimensions add no prompt lines. Without structure and with zero cold-open allowance,
+or without a profile, prompt bytes are unchanged.
 
 `Clip.transition_in: Transition` defaults to a hard cut, so old EDL JSON still loads.
 `Transition.kind` is `cut` or `dissolve`; `duration_s` is 0 for a cut and strictly
@@ -407,6 +416,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · plan: LLM planner prompt describes structure dimensions (plan/llm.py)
 - [x] Week 4 · cache: workspace-relative paths in cached JSON (paths.py, analyze/shots.py, analyze/quality.py, style/profile.py, pipeline.py)
 - [x] Week 5 · feedback: CLI classify subcommand applying profile deltas (cli.py)
 - [x] Week 3 · structure: rules planner produces montage bursts from montage_share (plan/rules.py)
@@ -1081,7 +1091,7 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   accepts a positive `intro_s` override, defaulting to 20 s. Style distance adds
   equally weighted `intro_pace = |log2(a / b)|` in octaves, skipped and reported when
   either side is unmeasured. Reference caches, detection parameters and notes are
-  unchanged. Rules planner use is described below; LLM planner use remains planned.
+  unchanged. Rules planner and LLM prompt use are described below.
 
 - 2026-10-18: rules planner intro pacing — after `assign_lengths` and before
   `fit_lengths`, the pure `plan/rules.apply_intro_pace` multiplies intro bases by
@@ -1213,6 +1223,18 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   approximation: fragmented eligible runs, limited capacity, an EDL median that
   differs from the reference, and a subsequent cold-open move can change the
   measured share. No schema, CLI, pipeline, style distance or LLM planner changes.
+
+- 2026-10-19: LLM planner structure guidance — the deterministic `plan/llm.py`
+  prompt describes measured `montage_share` (including an explicit no-bursts target
+  for zero), defining bursts as at least three consecutive clips strictly shorter
+  than half the profile median and giving that threshold in seconds. Measured
+  `intro_pace_ratio` targets the median of clips starting before 20 s relative to
+  the body, with approximate seconds computed from the profile median as a body
+  estimate. New measured values use two decimal places. A positive `cold_open_clips`
+  replaces strict chronology wording with an allowance for at most N leading hook
+  clips, followed by a chronological remainder. Unmeasured dimensions add no lines;
+  absent structure with zero allowance, and absent profiles, preserve prompt bytes.
+  Validation, parsing, repair, schemas, rules planning, pipeline and CLI are unchanged.
 
 ## Open questions
 
