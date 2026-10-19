@@ -6,7 +6,8 @@ Week-1 baseline and, later, the fallback when the planner's EDL cannot be repair
 2. order chronologically (asset creation time, then file name, then shot start)
 3. pick shots: "coverage" = every recording (a moment of the day) gets a clip, the rest
    by how much usable footage it has, best shot per chronological bin; "highlights" =
-   the k best overall, then re-sorted by time
+   the k best overall, then re-sorted by time; replace adjacent duplicate-group
+   picks when a chronological, conflict-free alternative exists
 4. sample the profile's length distribution, using its mean to choose k; assign long
    samples to shots with room, then fit to the target with one shared offset clamped
    to p10..p90 and each shot's usable part; grow / shrink k until within tolerance
@@ -211,17 +212,64 @@ def assign_transitions(
     return transitions
 
 
+def avoid_adjacent_duplicates(
+    picked: Sequence[_Candidate],
+    alternatives: Sequence[Sequence[_Candidate]],
+) -> list[_Candidate]:
+    """Replace conflicting later picks left to right, without mutating inputs.
+
+    Picks are chronological with unique shot IDs and order values. Each position
+    has an alternative pool (its coverage bin, or all candidates for highlights).
+    Replacements must be unselected, between both neighbours, and conflict with
+    neither. Prefer higher scores, then earlier order; keep the pick if none fits.
+    None groups never conflict. The number of picks is preserved.
+    """
+    result = list(picked)
+    selected = {c.shot.shot_id for c in result}
+    for i in range(1, len(result)):
+        previous, current = result[i - 1], result[i]
+        group = previous.shot.dup_group
+        if group is None or group != current.shot.dup_group:
+            continue
+        following = result[i + 1] if i + 1 < len(result) else None
+        replacement = min(
+            (
+                c
+                for c in alternatives[i]
+                if c.shot.shot_id not in selected
+                and previous.order < c.order
+                and (following is None or c.order < following.order)
+                and (
+                    c.shot.dup_group is None
+                    or (
+                        c.shot.dup_group != group
+                        and (following is None or c.shot.dup_group != following.shot.dup_group)
+                    )
+                )
+            ),
+            key=lambda c: (-c.score, c.order),
+            default=None,
+        )
+        if replacement is not None:
+            selected.remove(current.shot.shot_id)
+            selected.add(replacement.shot.shot_id)
+            result[i] = replacement
+    return result
+
+
 def select(cands: list[_Candidate], k: int, strategy: str) -> list[_Candidate]:
     """k candidates, returned in chronological order."""
     k = max(1, min(k, len(cands)))
     if strategy == "highlights":
-        picked = sorted(cands, key=lambda c: (-c.score, c.order))[:k]
+        picked = sorted(sorted(cands, key=lambda c: (-c.score, c.order))[:k], key=lambda c: c.order)
+        alternatives = [cands] * k
     else:
-        picked = _coverage(cands, k)
-    return sorted(picked, key=lambda c: c.order)
+        alternatives = _coverage_bins(cands, k)
+        picked = [max(b, key=lambda c: (c.score, -c.order)) for b in alternatives]
+    return avoid_adjacent_duplicates(picked, alternatives)
 
 
-def _coverage(cands: list[_Candidate], k: int) -> list[_Candidate]:
+def _coverage_bins(cands: list[_Candidate], k: int) -> list[list[_Candidate]]:
     """Every recording (asset) is a moment of the day. With enough slots each moment gets
     one clip and the rest go by usable footage (largest remainder), so a long one-take
     cannot crowd out the last scene; with fewer slots than moments, pick from k evenly
@@ -234,8 +282,7 @@ def _coverage(cands: list[_Candidate], k: int) -> list[_Candidate]:
             moments.append([c])
     if k < len(moments):
         m = len(moments)
-        bins = [sum(moments[i * m // k : (i + 1) * m // k], []) for i in range(k)]
-        return [max(b, key=lambda c: (c.score, -c.order)) for b in bins]
+        return [sum(moments[i * m // k : (i + 1) * m // k], []) for i in range(k)]
 
     weights = [sum(c.avail for c in mo) for mo in moments]
     extra = k - len(moments)
@@ -246,12 +293,11 @@ def _coverage(cands: list[_Candidate], k: int) -> list[_Candidate]:
         for i in by_remainder:
             if sum(alloc) < k and alloc[i] < len(moments[i]):
                 alloc[i] += 1
-    picked = []
+    bins = []
     for mo, a in zip(moments, alloc, strict=True):
         n = len(mo)
-        bins = [mo[j * n // a : (j + 1) * n // a] for j in range(a)]
-        picked += [max(b, key=lambda c: (c.score, -c.order)) for b in bins]
-    return picked
+        bins.extend(mo[j * n // a : (j + 1) * n // a] for j in range(a))
+    return bins
 
 
 def rough_cut(

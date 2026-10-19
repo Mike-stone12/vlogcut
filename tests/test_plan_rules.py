@@ -7,8 +7,10 @@ import pytest
 from vlogcut.plan import RoughCutError, RoughCutParams, rough_cut, score_shot
 from vlogcut.plan.rules import (
     DEFAULT_PACING,
+    _Candidate,
     assign_lengths,
     assign_transitions,
+    avoid_adjacent_duplicates,
     expected_length,
     fit_lengths,
     place_on_cut_points,
@@ -25,6 +27,7 @@ from vlogcut.schemas import (
     TransitionMix,
 )
 from vlogcut.style.profile import duration_stats
+from vlogcut.validate.checks import validate_edl
 
 T0 = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
 
@@ -57,6 +60,123 @@ def _by_id(shots: list[Shot]) -> dict[str, Shot]:
 
 
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("strategy", ["coverage", "highlights"])
+@pytest.mark.parametrize("layout", ["single", "moments", "pooled_moments"])
+def test_rough_cut_avoids_adjacent_duplicates(
+    monkeypatch: pytest.MonkeyPatch, strategy: str, layout: str
+) -> None:
+    asset_ids = {
+        "single": ["a"] * 6,
+        "moments": ["a", "a", "b", "b", "c", "c"],
+        "pooled_moments": list("abcdef"),
+    }[layout]
+    assets = [_asset(aid, i * 60) for i, aid in enumerate(dict.fromkeys(asset_ids))]
+    shots = [_shot(aid, i) for i, aid in enumerate(asset_ids)]
+    shots[0].dup_group = shots[2].dup_group = "repeat"
+    scores = dict(zip((s.shot_id for s in shots), [10, 1, 9, 2, 8, 1], strict=True))
+    params = RoughCutParams(target_s=9.45, strategy=strategy)
+
+    def score(shot: Shot) -> float:
+        return scores[shot.shot_id]
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            "vlogcut.plan.rules.avoid_adjacent_duplicates", lambda picked, _: list(picked)
+        )
+        naive = rough_cut(shots, assets, params, score=score)
+    assert [c.shot_id for c in naive.clips] == [shots[i].shot_id for i in (0, 2, 4)]
+    assert "duplicate_neighbours" in {v.code for v in validate_edl(naive, shots)}
+
+    edl = rough_cut(shots, assets, params, score=score)
+    assert [c.shot_id for c in edl.clips] == [shots[i].shot_id for i in (0, 3, 4)]
+    assert len(edl.clips) == len(naive.clips) == 3
+    assert validate_edl(edl, shots, target_s=params.target_s) == []
+    assert edl.model_dump_json() == rough_cut(shots, assets, params, score=score).model_dump_json()
+
+
+@pytest.mark.parametrize("strategy", ["coverage", "highlights"])
+def test_rough_cut_keeps_duplicates_without_alternatives(strategy: str) -> None:
+    shots = [_shot("a", i) for i in range(3)]
+    for shot in shots:
+        shot.dup_group = "repeat"
+    edl = rough_cut(shots, [_asset("a", 0)], RoughCutParams(target_s=9.45, strategy=strategy))
+    assert [c.shot_id for c in edl.clips] == [s.shot_id for s in shots]
+    assert [v.code for v in validate_edl(edl, shots)] == ["duplicate_neighbours"] * 2
+
+
+@pytest.mark.parametrize("strategy", ["coverage", "highlights"])
+@pytest.mark.parametrize("unique_groups", [False, True])
+def test_rough_cut_without_duplicate_groups_matches_legacy_json(
+    monkeypatch: pytest.MonkeyPatch, strategy: str, unique_groups: bool
+) -> None:
+    shots, assets = _day(5)
+    if unique_groups:
+        for shot in shots:
+            shot.dup_group = shot.shot_id
+    params = RoughCutParams(target_s=30, strategy=strategy)
+    actual = rough_cut(shots, assets, params).model_dump_json()
+    monkeypatch.setattr(
+        "vlogcut.plan.rules.avoid_adjacent_duplicates", lambda picked, _: list(picked)
+    )
+    assert actual.encode() == rough_cut(shots, assets, params).model_dump_json().encode()
+
+
+def _candidate(order: int, group: str | None, score: float = 1.0) -> _Candidate:
+    shot = _shot("a", order)
+    shot.dup_group = group
+    return _Candidate(shot=shot, lo=0, hi=shot.duration_s, order=order, score=score)
+
+
+@pytest.mark.parametrize("later_score,expected", [(1.0, 1), (2.0, 3)])
+def test_avoid_duplicates_score_then_chronology(later_score: float, expected: int) -> None:
+    cands = [
+        _candidate(0, "x"),
+        _candidate(1, "y"),
+        _candidate(2, "x"),
+        _candidate(3, "z", later_score),
+    ]
+    picked = [cands[0], cands[2]]
+    pools = [list(reversed(cands))] * 2
+    before = [c.model_dump() for c in cands]
+    result = avoid_adjacent_duplicates(picked, pools)
+    assert [c.order for c in result] == [0, expected]
+    assert result == avoid_adjacent_duplicates(picked, [cands] * 2)
+    assert picked == [cands[0], cands[2]]
+    assert [c.model_dump() for c in cands] == before
+    assert pools == [list(reversed(cands))] * 2
+
+
+def test_avoid_duplicates_checks_both_neighbours_and_chronology() -> None:
+    cands = [
+        _candidate(0, None, 10),  # before predecessor
+        _candidate(1, "x", 10),  # already selected
+        _candidate(2, "x", 10),  # conflicts with predecessor
+        _candidate(3, "x"),  # original conflicting pick
+        _candidate(4, "y", 10),  # conflicts with successor
+        _candidate(5, None),  # valid even with a None successor
+        _candidate(6, "y", 10),  # already selected
+        _candidate(7, None, 10),  # after successor
+    ]
+    picked = [cands[i] for i in (1, 3, 6)]
+    assert [c.order for c in avoid_adjacent_duplicates(picked, [cands] * 3)] == [1, 5, 6]
+    cands[6].shot.dup_group = None
+    cands[4].shot.dup_group = "x"
+    assert [c.order for c in avoid_adjacent_duplicates(picked, [cands] * 3)] == [1, 5, 6]
+    assert avoid_adjacent_duplicates(picked, [[c] for c in picked]) == picked
+
+
+def test_avoid_duplicates_uses_updated_predecessor() -> None:
+    cands = [_candidate(i, group) for i, group in enumerate(["x", None, "x", "x"])]
+    picked = [cands[i] for i in (0, 2, 3)]
+    assert [c.order for c in avoid_adjacent_duplicates(picked, [cands] * 3)] == [0, 1, 3]
+
+
+@pytest.mark.parametrize("groups", [[], [None], [None, None], [None, "x", None], ["x", "y"]])
+def test_avoid_duplicates_no_conflicts(groups: list[str | None]) -> None:
+    picked = [_candidate(i, group) for i, group in enumerate(groups)]
+    assert avoid_adjacent_duplicates(picked, [picked] * len(picked)) == picked
 
 
 @pytest.mark.parametrize("offset", [4.123456, 7.123456])
