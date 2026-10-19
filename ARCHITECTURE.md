@@ -147,9 +147,11 @@ explainable, and it would break principle 2.
   order, except an optional cold open of at most `StyleProfile.cold_open_clips` clips
   at the start (a hook from later in the day, then back to the beginning); transition
   types and audio modes allowed by the profile
-- Planned repair on failure: structured error list goes back to the planner (max N
-  rounds), then a rule-based fallback fix. Repair, fallback fixes and beat snapping
-  integration remain planned.
+- A pure rule-based fallback helper, `validate/repair.repair_edl`, drops unknown or
+  rejected clips and repairs transitions without changing retained selections or
+  timing. It exists but is not wired into the pipeline. The LLM repair loop
+  (structured errors sent back to the planner for at most N rounds), fallback
+  integration and beat snapping integration remain planned.
 
 ### 6. Render / export
 - Preview mp4 (`render/preview.py`): FFmpeg on proxies (fast, low-res); cached clip
@@ -300,6 +302,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 4 · validate: deterministic repair helper for unknown/rejected clips and transitions (validate/repair.py)
 - [x] Week 4 · validate: checks run on every planned EDL, reported by the CLI (pipeline.py, cli.py)
 - [x] Week 4 · validate: deterministic hard checks (validate/checks.py)
 - [x] Week 3 · cut-point candidates: audio pauses → Shot.cut_points → rules planner placement (analyze/pauses.py, plan/rules.py)
@@ -705,6 +708,18 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   helper returns a new EDL, preserving transitions, audio and other metadata;
   inputs are never mutated. No schema change or pipeline wiring. Chosen-music
   analysis and `MusicTrack` remain planned.
+
+- 2026-10-31: deterministic repair — `validate/repair.repair_edl` returns a deep copy,
+  dropping unknown and quality-rejected shots while preserving retained clip order.
+  The first retained clip enters with a hard cut; dropping all clips raises
+  `ValueError`. A measured zero dissolve share forbids dissolves; an unmeasured mix
+  or absent profile allows them. Dissolves are capped left to right at both
+  neighbouring timeline durations and the remaining half-window space, using the
+  checks' exact comparisons; no positive space means a hard cut. In/out points,
+  speed, audio, target, notes and music cues are preserved; the computed EDL total
+  follows the remaining clips. Bounds, chronology, duplicate, target and pacing
+  violations remain reported, not repaired. No new selections, schema changes,
+  beat snapping, LLM repair rounds or pipeline/CLI wiring.
 
 ## Open questions
 
