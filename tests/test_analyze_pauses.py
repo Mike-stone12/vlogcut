@@ -15,9 +15,16 @@ from vlogcut.analyze import (
     load_mono_audio,
     rms_envelope,
 )
+from vlogcut.analyze.pauses import cut_points_for_span
 from vlogcut.ingest import ffmpeg
+from vlogcut.schemas import CutPoint
 
-np = pytest.importorskip("numpy")
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
+needs_numpy = pytest.mark.skipif(np is None, reason="numpy not available")
 RATE = 16000
 FRAME = 0.02
 
@@ -30,6 +37,7 @@ def _pauses(samples: np.ndarray, params: PauseParams | None = None) -> list[Paus
     return find_pauses(rms_envelope(samples, RATE, FRAME), FRAME, params or PauseParams())
 
 
+@needs_numpy
 def test_rms_level_frame_count_and_partial_frame() -> None:
     envelope = rms_envelope(_tone(1.01), RATE)
     assert len(envelope) == 51
@@ -38,6 +46,7 @@ def test_rms_level_frame_count_and_partial_frame() -> None:
     assert rms_envelope(np.empty(0), RATE).size == 0
 
 
+@needs_numpy
 def test_known_gaps() -> None:
     samples = np.concatenate([_tone(1), np.zeros(9600), _tone(0.8), np.zeros(6400), _tone(1)])
     pauses = _pauses(samples)
@@ -48,10 +57,12 @@ def test_known_gaps() -> None:
 
 
 @pytest.mark.parametrize("gap_s", [0.02, 0.12, 0.24])
+@needs_numpy
 def test_short_gaps_ignored(gap_s: float) -> None:
     assert _pauses(np.concatenate([_tone(1), np.zeros(round(gap_s * RATE)), _tone(1)])) == []
 
 
+@needs_numpy
 def test_relative_threshold_admits_noise_above_absolute_floor() -> None:
     noise = np.random.default_rng(7).normal(0, 0.01, round(0.6 * RATE))  # about -40 dBFS
     assert rms_envelope(noise, RATE).min() > -50
@@ -64,11 +75,13 @@ def test_relative_threshold_admits_noise_above_absolute_floor() -> None:
 
 
 @pytest.mark.parametrize("level", [0.0, 0.0001, 1.0])
+@needs_numpy
 def test_unstructured_audio_has_no_pauses(level: float) -> None:
     assert _pauses(_tone(2) * level) == []
     assert find_pauses(np.empty(0), FRAME, PauseParams()) == []
 
 
+@needs_numpy
 def test_smoothing_removes_isolated_loud_and_quiet_frames() -> None:
     envelope = np.full(150, -3.0)
     envelope[50:80] = -100
@@ -78,6 +91,7 @@ def test_smoothing_removes_isolated_loud_and_quiet_frames() -> None:
     assert (pause.start_s, pause.end_s) == pytest.approx((1, 1.6))
 
 
+@needs_numpy
 def test_only_internal_gaps_and_custom_minimum() -> None:
     samples = np.concatenate([np.zeros(RATE), _tone(1), np.zeros(9600), _tone(1), np.zeros(RATE)])
     assert len(_pauses(samples)) == 1
@@ -93,12 +107,48 @@ def test_cut_points_bounds_margin_and_order() -> None:
     assert cut_points_in([], 0, 4) == []
 
 
+def test_cut_points_for_span_default_margin_sorts_and_deduplicates() -> None:
+    midpoints = [14, 13.9, 13.95, 12, 9, 10.05, 10.1, 11, 11, 15, 10]
+    original = midpoints.copy()
+    assert cut_points_for_span(midpoints, 10, 14) == [
+        CutPoint(time_s=11, kind="pause"),
+        CutPoint(time_s=12, kind="pause"),
+    ]
+    assert midpoints == original
+
+
+@pytest.mark.parametrize("margin, expected", [(0, [11, 12, 13]), (1, [12]), (2, []), (3, [])])
+def test_cut_points_for_span_margin_edges(margin: float, expected: list[float]) -> None:
+    assert cut_points_for_span([10, 11, 12, 13, 14], 10, 14, margin_s=margin) == [
+        CutPoint(time_s=t, kind="pause") for t in expected
+    ]
+
+
+def test_cut_points_for_span_empty_input() -> None:
+    assert cut_points_for_span([], 10, 14) == []
+
+
+@pytest.mark.parametrize("midpoints", [[], [12]])
+def test_cut_points_for_span_negative_margin(midpoints: list[float]) -> None:
+    with pytest.raises(ValueError, match="margin"):
+        cut_points_for_span(midpoints, 10, 14, margin_s=-0.1)
+
+
+def test_pause_records_map_to_cut_point_candidates() -> None:
+    pauses = [Pause(12, 13), Pause(10, 11)]
+    assert cut_points_for_span(cut_points_in(pauses, 10, 14), 10, 14) == [
+        CutPoint(time_s=10.5, kind="pause"),
+        CutPoint(time_s=12.5, kind="pause"),
+    ]
+
+
 @pytest.mark.parametrize("kwargs", [{"min_pause_s": 0}, {"frame_s": 0}, {"smooth_s": -1}])
 def test_invalid_params(kwargs: dict[str, float]) -> None:
     with pytest.raises(ValidationError):
         PauseParams(**kwargs)
 
 
+@needs_numpy
 def test_decoder_normalizes_shared_pcm(monkeypatch: pytest.MonkeyPatch) -> None:
     def probe(name: str, args: list[str]) -> str:
         assert name == "ffprobe" and args[-1] == "proxy.mp4"
@@ -129,6 +179,7 @@ def test_decoder_normalizes_shared_pcm(monkeypatch: pytest.MonkeyPatch) -> None:
     assert samples.tolist() == [-1, 0, 0.5, 32767 / 32768]
 
 
+@needs_numpy
 def test_no_audio_skips_decode_and_errors_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ffmpeg, "run", lambda *args: "")
     monkeypatch.setattr(ffmpeg, "run_bytes", lambda *args: pytest.fail("unexpected decode"))
@@ -144,6 +195,7 @@ def test_no_audio_skips_decode_and_errors_propagate(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.ffmpeg
+@needs_numpy
 def test_detect_pauses_lavfi(tmp_path: Path) -> None:
     path = tmp_path / "gap.mp4"
     ffmpeg.run(
@@ -189,6 +241,7 @@ def test_detect_pauses_lavfi(tmp_path: Path) -> None:
 
 
 @pytest.mark.ffmpeg
+@needs_numpy
 def test_detect_pauses_without_audio(make_clip: Callable[..., Path]) -> None:
     path = make_clip(audio=False)
     assert load_mono_audio(path) is None
