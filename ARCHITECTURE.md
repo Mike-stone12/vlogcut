@@ -151,7 +151,13 @@ explainable, and it would break principle 2.
   and repair loop are opt-in via `pipeline.cut(planner="llm", router=...)` or
   `vlogcut cut --planner llm`; the rules planner stays the default. The CLI reads
   `--config` (default `config.yaml`) for LLM planning or `--caption`, sharing one
-  router when both are requested, and accepts `--brief`.
+  router when both are requested, and accepts `--brief`. Optional edit constraints
+  reach the LLM planner via `pipeline.cut(constraints=...)` or `cut --constraints`.
+  Non-blank strings appear in input order, one per line in a labelled section of
+  the initial prompt; repair rounds reuse that conversation without repeating the
+  section. Missing, empty or blank-only constraints preserve prompt bytes. Rules
+  planning (including fallback) ignores constraints with one warning. Constraints
+  do not affect validation, deterministic repair, snapping or rendering.
 - If the shot table is too long: two stages — pick segments, then pick shots per segment
 - `plan/rules.py` (+ ranker) is the no-model baseline and the fallback. The LLM planner
   becomes the default only once the eval shows it beats that baseline on style distance
@@ -228,8 +234,12 @@ explainable, and it would break principle 2.
   Output defaults to `<profile stem>.updated.json` beside the input; only explicit `-o`
   can replace the input profile. Edit constraints print one per line, or are saved as a
   JSON list with `--constraints-out CONSTRAINTS_JSON`. A stdout summary counts classified
-  records, applied deltas and constraints. Classification is not wired into `cut`, and
-  re-planning from constraints remains planned.
+  records, applied deltas and constraints. Re-plan with
+  `vlogcut cut FOOTAGE --planner llm --constraints CONSTRAINTS_JSON`; the CLI loads
+  this JSON list of strings before analysis and reports missing or invalid files
+  as a one-line error with exit 1. Re-planning from constraints is supported only
+  by the LLM planner; the rules planner logs that constraints are ignored.
+  Classification itself is not run inside `cut`.
 - Every (context, variant A, variant B, choice) is logged as a preference pair and
   feeds the ranker (§3b)
 
@@ -427,6 +437,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 5 · feedback: edit constraints fed into the LLM planner via cut --constraints (plan/llm.py, pipeline.py, cli.py)
 - [x] Week 3 · style: look stats in style distance (style/distance.py)
 - [x] Week 3 · style: look stats from references (schemas.py, style/profile.py)
 
@@ -508,6 +519,17 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: feedback constraints reach the LLM planner through `cut --constraints`
+  and `pipeline.cut(constraints=...)`. Load the JSON string list saved by
+  `feedback classify --constraints-out`, rejecting missing files, invalid JSON
+  and non-string-list shapes before analysis. Preserve input order, omit blank
+  strings and flatten whitespace so each constraint occupies one prompt line.
+  Add the labelled section only to the initial user message; both public LLM
+  planning entry points accept constraints and repair rounds reuse the conversation.
+  Absent or empty constraints preserve prompt bytes. Rules planning, including
+  fallback, logs one warning for non-blank constraints and preserves EDL output.
+  No schema, validation, deterministic repair, snapping or rendering changes.
 
 - 2026-10-19: look stats in style distance — compare `StyleProfile.look` brightness
   and saturation by absolute difference, and warmth by half the absolute difference

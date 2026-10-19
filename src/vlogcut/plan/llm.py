@@ -74,6 +74,7 @@ def build_planner_messages(
     target_s: float,
     profile: StyleProfile | None = None,
     brief: str | None = None,
+    constraints: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Build deterministic text messages; callers supply shots in chronological order."""
     system = """Pick and order clips from the shot table to make a rough cut of about
@@ -124,11 +125,21 @@ gain_db (number, default 0). No music tracks are supplied here, so leave music e
             else " Dissolve share: not measured."
         )
         pacing = "\n".join([pacing, *_structure_lines(profile)])
+    constraint_lines = [" ".join(text.split()) for text in constraints or () if text.strip()]
     user = "\n".join(
         [
             f"Target duration: {target_s} seconds (target_s).",
             pacing,
             f"Brief: {brief}" if brief else "Brief: none.",
+            *(
+                [
+                    "Edit constraints from feedback on a previous cut "
+                    "(follow them where possible):",
+                    *constraint_lines,
+                ]
+                if constraint_lines
+                else []
+            ),
             "Shot table (chronological order):",
             format_shot_table(shots),
         ]
@@ -159,9 +170,12 @@ def plan_with_llm(
     target_s: float,
     profile: StyleProfile | None = None,
     brief: str | None = None,
+    constraints: Sequence[str] | None = None,
 ) -> EDL:
     """Call the planner once and parse its EDL, without semantic checks or fallback."""
-    messages = build_planner_messages(shots, target_s=target_s, profile=profile, brief=brief)
+    messages = build_planner_messages(
+        shots, target_s=target_s, profile=profile, brief=brief, constraints=constraints
+    )
     edl = parse_planner_response(router.complete("planner", messages))
     log.info("LLM planner parsed %d clips, %.1f s", len(edl.clips), edl.total_duration_s)
     return edl
@@ -174,6 +188,7 @@ def plan_with_repair(
     target_s: float,
     profile: StyleProfile | None = None,
     brief: str | None = None,
+    constraints: Sequence[str] | None = None,
     max_rounds: int = 2,
 ) -> LLMPlanResult:
     """Plan once, then retry parse/check failures for at most ``max_rounds`` rounds.
@@ -184,7 +199,9 @@ def plan_with_repair(
     """
     if max_rounds < 0:
         raise ValueError("max_rounds must be non-negative")
-    messages = build_planner_messages(shots, target_s=target_s, profile=profile, brief=brief)
+    messages = build_planner_messages(
+        shots, target_s=target_s, profile=profile, brief=brief, constraints=constraints
+    )
     last_edl: EDL | None = None
     violations: list[Violation] = []
     for round_index in range(max_rounds + 1):
