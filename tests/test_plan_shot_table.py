@@ -7,7 +7,7 @@ from vlogcut.schemas import CutPoint, QualityFlags, Shot
 
 HEADER = (
     "shot_id\tasset_id\tstart_s\tduration_s\tusable_range_rel_s\twarnings\tdup_group\t"
-    "kept_for_audio\tcut_points_rel_s\trejected\treject_reasons"
+    "kept_for_audio\tcut_points_rel_s\tcaption\ttags\tinterest\trejected\treject_reasons"
 )
 
 
@@ -37,8 +37,37 @@ def test_relative_times_and_fixed_precision() -> None:
 
     assert format_shot_table([shot]) == (
         HEADER + '\n"s1"\t"asset-full-id"\t10.00\t6.00\t1.12..5.88\t-\t-\tfalse\t'
-        "0.50:pause,2.50:pause\tfalse\t-\nOmitted rejected shots: 0"
+        "0.50:pause,2.50:pause\t-\t-\t-\tfalse\t-\nOmitted rejected shots: 0"
     )
+
+
+def test_caption_tags_and_interest() -> None:
+    shot = _shot()
+    shot.caption = "Pouring coffee."
+    shot.tags = ["pouring", "coffee", "morning"]
+    shot.interest = 4
+    before = shot.model_dump()
+
+    table = format_shot_table([shot])
+    assert table == format_shot_table([shot])
+    lines = table.splitlines()
+    assert lines[0] == HEADER
+    assert lines[0].split("\t")[9:12] == ["caption", "tags", "interest"]
+    assert lines[1].split("\t")[9:12] == [
+        '"Pouring coffee."',
+        '["pouring","coffee","morning"]',
+        "4",
+    ]
+    assert shot.model_dump() == before
+
+
+@pytest.mark.parametrize("caption", [None, ""])
+def test_missing_caption_metadata(caption: str | None) -> None:
+    shot = _shot()
+    shot.caption = caption
+
+    row = format_shot_table([shot]).splitlines()[1].split("\t")
+    assert row[9:12] == ["-", "-", "-"]
 
 
 def test_warnings_duplicate_group_and_audio_flag() -> None:
@@ -99,6 +128,8 @@ def test_text_cannot_add_rows_or_columns() -> None:
     shot.dup_group = "group\tname"
     shot.quality.warnings = ["warning\ncontinued"]
     shot.quality.reject_reasons = ["reason\tcontinued"]
+    shot.caption = 'Pouring\tcoffee\ninto a "mug".'
+    shot.tags = ['coffee\t"mug"', "morning\nroutine"]
 
     lines = format_shot_table([shot]).splitlines()
     assert len(lines) == 3
@@ -108,4 +139,7 @@ def test_text_cannot_add_rows_or_columns() -> None:
     assert json.loads(row[1]) == shot.asset_id
     assert json.loads(row[5]) == shot.quality.warnings
     assert json.loads(row[6]) == shot.dup_group
-    assert json.loads(row[10]) == shot.quality.reject_reasons
+    assert row[9] == '"Pouring\\tcoffee\\ninto a \\"mug\\"."'
+    assert json.loads(row[9]) == shot.caption
+    assert json.loads(row[10]) == shot.tags
+    assert json.loads(row[13]) == shot.quality.reject_reasons
