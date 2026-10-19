@@ -316,6 +316,19 @@ def test_style_show_and_diff(tmp_path, capsys):
         assert dim in out
 
 
+def test_style_diff_measured_look(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    paths = [_write_profile(tmp_path / name, 1, 2, 4, 20) for name in ("a.json", "b.json")]
+    for path, warmth in zip(paths, [-0.2, 0.2], strict=True):
+        profile = json.loads(path.read_text(encoding="utf-8"))
+        profile["look"] = dict(brightness=0.3, saturation=0.4, warmth=warmth, frames=3)
+        path.write_text(json.dumps(profile), encoding="utf-8")
+    assert cli.main(["style", "diff", *map(str, paths)]) == 0
+    rows = [line.split() for line in capsys.readouterr().out.splitlines()]
+    assert ["brightness", "0.30", "0.30", "0.00"] in rows
+    assert ["saturation", "0.40", "0.40", "0.00"] in rows
+    assert ["warmth", "-0.20", "0.20", "0.20"] in rows
+
+
 def test_style_show_measured_transitions(tmp_path, capsys):
     path = _write_profile(tmp_path / "mix.json", 1, 2, 4, 20)
     profile = json.loads(path.read_text(encoding="utf-8"))

@@ -4,7 +4,9 @@ Pacing dimensions (shot-duration p10 / median / p90, cuts per minute, intro/body
 quantities: a 1 s shot next to a 2 s one is as different as 4 s next to 8 s. Each is
 compared as |log2(a / b)|, so the unit is octaves and 1.0 means twice as fast or twice as
 slow. Ratio dimensions in [0, 1] (`beat_aligned_ratio`, `speech_ratio`, `dissolve`,
-`montage_share`) use the absolute difference. A dimension that either side has not
+`montage_share`, look brightness and saturation) use the absolute difference.
+Look warmth in [-1, 1] uses half the absolute difference to normalize to [0, 1].
+A dimension that either side has not
 measured (`None`) is skipped and listed
 in `StyleDistance.unmeasured`. Dimensions are equally weighted until the eval set says
 otherwise. Pure functions, no numpy.
@@ -21,6 +23,7 @@ from vlogcut.style.profile import profile_from_durations
 
 LOG_DIMS = ("p10", "median", "p90", "cuts_per_min", "intro_pace")  # |log2 ratio|
 RATIO_DIMS = ("beat_aligned_ratio", "speech_ratio", "dissolve", "montage_share")  # |difference|
+LOOK_DIMS = ("brightness", "saturation", "warmth")
 _LABELS = {
     "p10": "p10 shot s",
     "median": "median shot s",
@@ -31,6 +34,9 @@ _LABELS = {
     "dissolve": "dissolve",
     "montage_share": "montage_share",
     "intro_pace": "intro_pace",
+    "brightness": "brightness",
+    "saturation": "saturation",
+    "warmth": "warmth",
 }
 
 
@@ -59,6 +65,9 @@ def dimensions(profile: StyleProfile) -> dict[str, float | None]:
         "intro_pace": (
             profile.structure.intro_pace_ratio if profile.structure is not None else None
         ),
+        "brightness": profile.look.brightness if profile.look is not None else None,
+        "saturation": profile.look.saturation if profile.look is not None else None,
+        "warmth": profile.look.warmth if profile.look is not None else None,
     }
 
 
@@ -66,12 +75,14 @@ def profile_distance(a: StyleProfile, b: StyleProfile) -> StyleDistance:
     va, vb = dimensions(a), dimensions(b)
     per_dim: dict[str, float] = {}
     unmeasured: list[str] = []
-    for dim in (*LOG_DIMS, *RATIO_DIMS):
+    for dim in (*LOG_DIMS, *RATIO_DIMS, *LOOK_DIMS):
         x, y = va[dim], vb[dim]
         if x is None or y is None:
             unmeasured.append(dim)
         elif dim in LOG_DIMS:
             per_dim[dim] = abs(math.log2(x / y))
+        elif dim == "warmth":
+            per_dim[dim] = abs(x - y) / 2
         else:
             per_dim[dim] = abs(x - y)
     total = sum(per_dim.values()) / len(per_dim)  # the pacing dims are always measured

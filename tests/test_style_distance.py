@@ -3,8 +3,22 @@ from __future__ import annotations
 import pytest
 
 from vlogcut.pipeline import cut
-from vlogcut.schemas import EDL, Clip, DurationStats, StyleProfile, Transition, TransitionMix
-from vlogcut.style import StyleError, build_profile, profile_distance, profile_from_edl
+from vlogcut.schemas import (
+    EDL,
+    Clip,
+    DurationStats,
+    LookStats,
+    StyleProfile,
+    Transition,
+    TransitionMix,
+)
+from vlogcut.style import (
+    ReferenceParams,
+    StyleError,
+    build_profile,
+    profile_distance,
+    profile_from_edl,
+)
 from vlogcut.style.distance import format_diff, format_profile
 
 
@@ -40,6 +54,9 @@ def test_distance_is_zero_for_identical_and_one_octave_for_double_speed():
         "speech_ratio",
         "dissolve",
         "montage_share",
+        "brightness",
+        "saturation",
+        "warmth",
     ]
 
 
@@ -48,8 +65,72 @@ def test_ratio_dims_count_only_when_measured_on_both_sides():
     b = _profile(1.0, 2.0, 4.0, 20.0, beat_aligned_ratio=0.3)
     d = profile_distance(a, b)
     assert d.per_dim["beat_aligned_ratio"] == pytest.approx(0.5)
-    assert d.unmeasured == ["intro_pace", "speech_ratio", "dissolve", "montage_share"]
+    assert d.unmeasured == [
+        "intro_pace", "speech_ratio", "dissolve", "montage_share",
+        "brightness", "saturation", "warmth",
+    ]  # fmt: skip
     assert d.total == pytest.approx(0.5 / 5)  # four pacing dims at 0 plus one ratio dim
+
+
+def test_identical_looks_have_zero_distance() -> None:
+    a = _profile(1, 2, 4, 20, look=dict(brightness=0.3, saturation=0.4, warmth=-0.2, frames=3))
+    d = profile_distance(a, a)
+    for dim in ("brightness", "saturation", "warmth"):
+        assert d.per_dim[dim] == 0
+        assert dim not in d.unmeasured
+    assert d.total == 0
+
+
+@pytest.mark.parametrize(("warm_a", "warm_b", "delta"), [(-0.2, 0.2, 0.2), (-1, 1, 1)])
+def test_look_distance_known_values_and_diff_rows(
+    warm_a: float,
+    warm_b: float,
+    delta: float,
+) -> None:
+    a = _profile(1, 2, 4, 20, look=dict(brightness=0.3, saturation=0.4, warmth=warm_a, frames=3))
+    b = _profile(0.5, 1, 2, 40, look=dict(brightness=0.8, saturation=0.1, warmth=warm_b, frames=9))
+    for left, right in [(a, b), (b, a)]:
+        d = profile_distance(left, right)
+        assert d.per_dim == pytest.approx(
+            {
+                "p10": 1,
+                "median": 1,
+                "p90": 1,
+                "cuts_per_min": 1,
+                "brightness": 0.5,
+                "saturation": 0.3,
+                "warmth": delta,
+            }
+        )
+        assert d.total == pytest.approx((4 + 0.5 + 0.3 + delta) / 7)
+    text = format_diff("a", a, "b", b, profile_distance(a, b))
+    for expected in [
+        ["brightness", "0.30", "0.80", "0.50"],
+        ["saturation", "0.40", "0.10", "0.30"],
+        ["warmth", f"{warm_a:.2f}", f"{warm_b:.2f}", f"{delta:.2f}"],
+    ]:
+        row = next(line for line in text.splitlines() if line.startswith(expected[0]))
+        assert row.split() == expected
+    assert "mixed; mean over 7 dims" in text
+
+
+@pytest.mark.parametrize("beat_ratio", [None, 0.8])
+def test_look_distance_skips_missing_look_on_either_side(beat_ratio: float | None) -> None:
+    a = _profile(1, 2, 4, 20, beat_aligned_ratio=beat_ratio)
+    b = _profile(0.5, 1, 2, 40, beat_aligned_ratio=0.3)
+    baseline = profile_distance(a, b)
+    measured = a.model_copy(
+        update={
+            "look": LookStats(brightness=0.3, saturation=0.4, warmth=-0.2, frames=3),
+        }
+    )
+    for left, right in [(measured, b), (b, measured), (a, b)]:
+        d = profile_distance(left, right)
+        assert d.per_dim == baseline.per_dim
+        assert d.total == baseline.total
+        for dim in ("brightness", "saturation", "warmth"):
+            assert dim in d.unmeasured
+            assert dim not in d.per_dim
 
 
 def test_profile_from_edl_uses_timeline_durations():
@@ -191,7 +272,10 @@ def test_round_trip_lands_near_the_reference(make_edited_clip, tmp_path):
     )
     slow_ref = make_edited_clip("slow.mp4", shot_lengths=[2.0, 3.0, 4.0, 5.0])
     refs_ws = tmp_path / "refs"
-    fast, slow = build_profile([fast_ref], refs_ws), build_profile([slow_ref], refs_ws)
+    # Evaluate pacing: synthetic footage differs in look, which planners do not match.
+    params = ReferenceParams(look=False)
+    fast = build_profile([fast_ref], refs_ws, params=params)
+    slow = build_profile([slow_ref], refs_ws, params=params)
     d_refs = profile_distance(fast, slow)
     assert d_refs.total > 1.5  # the two creators are octaves apart
 
@@ -211,7 +295,7 @@ def test_round_trip_lands_near_the_reference(make_edited_clip, tmp_path):
     assert d_edl.total < d_refs.total / 3, (d_edl, d_refs)
     assert d_edl.total < 0.1, d_edl
     # the path users take: profile the rendered preview with the real detector
-    d_video = profile_distance(fast, build_profile([quick.preview_path], refs_ws))
+    d_video = profile_distance(fast, build_profile([quick.preview_path], refs_ws, params=params))
     assert d_video.total < d_refs.total / 3, (d_video, d_refs)
     assert d_video.total < 0.2, d_video
     assert d_video.per_dim["cuts_per_min"] < 0.3  # the detector keeps our own cuts
