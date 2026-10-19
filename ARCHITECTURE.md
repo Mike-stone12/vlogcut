@@ -171,7 +171,12 @@ LLM-failure fallback) and the LLM prompt.
 variant preference pairs, EDLs keyed by file stem, and analyzed shots. It pairs
 each chosen-only shot with each rejected-only shot, excluding shared and unknown
 shots, preserving first-clip order and deduplicating ordered shot-ID pairs.
-Draft import and a CLI to train and save a `RankerModel` from feedback remain planned.
+`vlogcut ranker train FEEDBACK_JSON -w WORKSPACE [-o ranker.json] [--context TEXT] [-v]`
+trains and saves a `RankerModel` for `cut --ranker MODEL_JSON`, using
+`learn/train_cli.py` to compose preference derivation and existing training math.
+It excludes quality-rejected shots on both sides (the lower-level helpers leave
+that policy to callers), and fails when no training shot pairs remain. Draft import
+remains planned.
 No CLIP embedding is used yet. No end-to-end "video → edit" model: there is no data
 for it, it is not explainable, and it would break principle 2.
 
@@ -306,6 +311,15 @@ for it, it is not explainable, and it would break principle 2.
   `vlogcut feedback page PREVIEW [PREVIEW ...] [-o variants.html]`.
   `vlogcut feedback pairs FEEDBACK_JSON [--context TEXT] [-o pairs.json]` derives
   preference-pair JSON for storage or stdout.
+  `vlogcut ranker train FEEDBACK_JSON -w WORKSPACE [-o ranker.json] [--context TEXT] [-v]`
+  trains locally from those verdicts, `WORKSPACE/edl/<stem>.json` and the pipeline's
+  analyzed `WORKSPACE/shots.json` snapshot. Non-EDL files and `*.violations.json`
+  are excluded. Output defaults to `ranker.json` in the current directory and is
+  written atomically via a same-directory `.part` file then replace; a one-line
+  summary reports feedback, preference-pair and shot-pair counts and the output path.
+  Missing/invalid feedback, workspace inputs or referenced EDLs, and zero training
+  pairs fail with a one-line error and exit 1. Use the saved model with `cut --ranker`;
+  training is separate from cutting and makes no model-service calls.
 - Feedback (pick / reject / free text) → **feedback** role first *classifies* it:
   "the café part was too short" is about this edit and becomes a re-plan constraint;
   "too fast overall" is about style and becomes a validated `StyleProfile` delta.
@@ -352,7 +366,8 @@ The static variants page downloads a JSON array of `Feedback` records, validated
 `feedback.load_feedback` and ready for `feedback.preference_pairs`. Preference-pair
 persistence is available through `vlogcut feedback pairs -o`; the pure
 `learn.shot_pairs_from_preferences` helper converts these records into ranker
-training pairs. A CLI to train and save the ranker from feedback remains planned.
+training pairs. `vlogcut ranker train FEEDBACK_JSON -w WORKSPACE [-o ranker.json]`
+trains and saves the ranker from feedback for `cut --ranker MODEL_JSON`.
 
 `Shot.cut_points` holds code-proposed `CutPoint(time_s, kind)` candidates at absolute
 source-asset times, on the same timeline as `Shot.start_s` and `end_s`. Times must be
@@ -699,6 +714,19 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: ranker training CLI — `ranker train` names the saved artifact and
+  mirrors `style build` as a separate preparation step for `cut --ranker`.
+  Inputs are the saved Feedback array, EDLs keyed by file stem under
+  `WORKSPACE/edl/`, and the existing complete `WORKSPACE/shots.json` snapshot;
+  there is no new cache format or media analysis. Non-EDL JSON and violation
+  reports are ignored; referenced missing EDLs fail before deriving shot pairs.
+  The wrapper excludes quality-rejected shots on both sides, delegates to
+  `preference_pairs`, `shot_pairs_from_preferences` and `train_pairwise`, and
+  rejects zero shot pairs. `--context` labels preferences without changing ranker
+  features. Output defaults to `ranker.json`, atomically replaced via `.part`,
+  with feedback/preference/shot counts printed on success. Training stays offline
+  and separate from `cut`; schemas and training math are unchanged.
 
 - 2026-10-19: rules planner speech ratio — estimate talking duration at
   min(p90, usable duration) and b-roll at min(expected pacing length, that cap),

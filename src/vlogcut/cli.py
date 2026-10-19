@@ -1,6 +1,7 @@
 """Command line: `vlogcut cut <footage folder>` -> rough-cut preview,
 `vlogcut style build <reference videos>` -> style profile JSON, `style show / diff`.
 `vlogcut feedback page / pairs / classify` -> variants, preferences and profile updates.
+`vlogcut ranker train` -> trained ranker JSON for `cut --ranker`.
 
 Thin wrapper over pipeline, style and feedback helpers; argument parsing and output only.
 """
@@ -105,6 +106,16 @@ def build_parser() -> argparse.ArgumentParser:
     classify.add_argument(
         "--config", type=Path, default=Path("config.yaml"), help="model router config"
     )
+    r = sub.add_parser("ranker", help="train a shot ranker from saved variant feedback")
+    rs = r.add_subparsers(dest="ranker_command", required=True)
+    train = rs.add_parser("train", help="save a trained ranker for cut --ranker")
+    train.add_argument("feedback_json", type=Path, metavar="FEEDBACK_JSON")
+    train.add_argument(
+        "-w", "--workspace", type=Path, required=True, help="cut workspace with edl/ and shots.json"
+    )
+    train.add_argument("-o", "--out", type=Path, default=Path("ranker.json"), help="ranker JSON")
+    train.add_argument("--context", default="", help="project or brief description")
+    train.add_argument("-v", "--verbose", action="store_true")
     return parser
 
 
@@ -119,6 +130,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         _quiet_scenedetect()
     if args.command == "cut":
         return _cut(args)
+    if args.command == "ranker":
+        return _ranker_train(args)
     if args.command == "feedback":
         feedback_commands = {
             "page": _feedback_page, "pairs": _feedback_pairs, "classify": _feedback_classify,
@@ -417,6 +430,43 @@ def _feedback_classify(args: argparse.Namespace) -> int:
         f"{len(constraints)} constraints"
     )
     print(f"profile   {out}")
+    return 0
+
+
+def _ranker_train(args: argparse.Namespace) -> int:
+    from vlogcut.feedback import load_feedback, preference_pairs
+    from vlogcut.learn.train_cli import load_training_workspace, train_from_feedback
+
+    try:
+        records = load_feedback(args.feedback_json)
+        preferences = preference_pairs(records, context=args.context)
+        edls, shots = load_training_workspace(args.workspace)
+        missing = sorted({v for p in preferences for v in (p.chosen, p.rejected)} - edls.keys())
+        if missing:
+            raise ValueError(f"missing EDLs for feedback variants: {', '.join(missing)}")
+        model, count = train_from_feedback(records, edls, shots, context=args.context)
+        temporary: Path | None = None
+        try:
+            with NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="\n",
+                suffix=".part",
+                dir=args.out.parent,
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(model.model_dump_json(indent=1))
+            temporary.replace(args.out)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+    except (OSError, ValueError) as exc:
+        return _fail(" ".join(str(exc).split()))
+    print(
+        f"ranker    {len(records)} feedback records, {len(preferences)} preference pairs, "
+        f"{count} shot pairs -> {args.out}"
+    )
     return 0
 
 
