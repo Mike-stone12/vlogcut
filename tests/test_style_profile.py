@@ -19,6 +19,7 @@ from vlogcut.style.profile import (
     analyze_reference,
     combine_cuts,
     duration_stats,
+    montage_share,
     pooled_beat_ratio,
     shot_durations,
     transition_mix,
@@ -45,6 +46,37 @@ def test_duration_stats_quantiles():
 def test_duration_stats_needs_at_least_two_shots():
     with pytest.raises(StyleError, match="cut"):
         duration_stats([5.0])
+
+
+@pytest.mark.parametrize(
+    ("per_ref", "expected"),
+    [
+        ([[2, 3, 4]], 0.0),
+        ([[0.2, 0.2, 0.2, 2, 2], [0.2, 0.2, 2]], 0.375),
+        ([[2, 0.2, 0.2], [0.2, 0.2, 2]], 0.0),
+        ([[0.2, 0.2, 1, 0.2, 0.2]], 0.0),  # equality breaks a run
+        ([[0.2] * 4 + [2] + [0.2] * 3], 7 / 8),  # whole runs, including tail
+        ([[0.2, 2, 0.2, 2, 0.2]], 0.0),  # timeline order, never sorted
+        ([], None),
+        ([[], []], None),
+    ],
+)
+def test_montage_share(per_ref: list[list[float]], expected: float | None) -> None:
+    assert montage_share(per_ref, median_s=2) == expected
+
+
+@pytest.mark.parametrize(
+    ("median_s", "rel", "min_run"),
+    [(0, 0.5, 3), (-1, 0.5, 3), (2, 0, 3), (2, -0.5, 3), (2, 0.5, 1), (2, 0.5, 0)],
+)
+def test_montage_share_rejects_invalid_args(median_s: float, rel: float, min_run: int) -> None:
+    with pytest.raises(ValueError):
+        montage_share([], median_s, rel, min_run)
+
+
+def test_montage_share_custom_threshold_and_minimum_run() -> None:
+    assert montage_share([[0.5, 0.5, 2]], median_s=2, rel=0.3, min_run=2) == 2 / 3
+    assert montage_share([[0.5, 0.5, 2]], median_s=2, rel=0.25, min_run=2) == 0
 
 
 def _ref(
@@ -116,6 +148,17 @@ def test_aggregate_pools_shots_and_rates_by_total_time():
 def test_aggregate_without_references_raises():
     with pytest.raises(StyleError, match="reference"):
         aggregate([], ReferenceParams())
+
+
+def test_aggregate_measures_bursts_after_merging_with_pooled_median() -> None:
+    # After merging the sliver: [2, 2, .5, .5, .5] and [.5, .5, 2, 2, 2, 2].
+    # The first reference's own median is .5, but the pooled median is 2.
+    a = _ref("a", 5.5, [2, 4, 4.1, 4.5, 5])
+    b = _ref("b", 9, [0.5, 1, 3, 5, 7])
+    profile = aggregate([a, b], ReferenceParams())
+    assert profile.shot_duration_s.median == 2
+    assert profile.structure is not None
+    assert profile.structure.montage_share == 3 / 11
 
 
 @pytest.mark.parametrize(

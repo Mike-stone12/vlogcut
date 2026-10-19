@@ -3,8 +3,9 @@
 Pacing dimensions (shot-duration p10 / median / p90, cuts per minute) are positive ratio
 quantities: a 1 s shot next to a 2 s one is as different as 4 s next to 8 s. Each is
 compared as |log2(a / b)|, so the unit is octaves and 1.0 means twice as fast or twice as
-slow. Ratio dimensions in [0, 1] (`beat_aligned_ratio`, `speech_ratio`, `dissolve`) use the absolute
-difference. A dimension that either side has not measured (`None`) is skipped and listed
+slow. Ratio dimensions in [0, 1] (`beat_aligned_ratio`, `speech_ratio`, `dissolve`,
+`montage_share`) use the absolute difference. A dimension that either side has not
+measured (`None`) is skipped and listed
 in `StyleDistance.unmeasured`. Dimensions are equally weighted until the eval set says
 otherwise. Pure functions, no numpy.
 """
@@ -19,7 +20,7 @@ from vlogcut.schemas import EDL, StyleProfile, TransitionMix
 from vlogcut.style.profile import profile_from_durations
 
 LOG_DIMS = ("p10", "median", "p90", "cuts_per_min")  # positive; compared by |log2 ratio|
-RATIO_DIMS = ("beat_aligned_ratio", "speech_ratio", "dissolve")  # |difference| in [0, 1]
+RATIO_DIMS = ("beat_aligned_ratio", "speech_ratio", "dissolve", "montage_share")  # |difference|
 _LABELS = {
     "p10": "p10 shot s",
     "median": "median shot s",
@@ -28,6 +29,7 @@ _LABELS = {
     "beat_aligned_ratio": "beat-aligned",
     "speech_ratio": "speech ratio",
     "dissolve": "dissolve",
+    "montage_share": "montage_share",
 }
 
 
@@ -50,6 +52,9 @@ def dimensions(profile: StyleProfile) -> dict[str, float | None]:
         "beat_aligned_ratio": profile.beat_aligned_ratio,
         "speech_ratio": profile.speech_ratio,
         "dissolve": profile.transitions.dissolve if profile.transitions is not None else None,
+        "montage_share": (
+            profile.structure.montage_share if profile.structure is not None else None
+        ),
     }
 
 
@@ -70,7 +75,7 @@ def profile_distance(a: StyleProfile, b: StyleProfile) -> StyleDistance:
 
 
 def profile_from_edl(edl: EDL, source: str = "edl") -> StyleProfile:
-    """Measure timeline pacing and boundary transition mix without rendering."""
+    """Measure timeline pacing, montage bursts and transition mix without rendering."""
     profile = profile_from_durations([[c.timeline_duration_s for c in edl.clips]], [source])
     dissolve = sum(c.transition_in.kind == "dissolve" for c in edl.clips) / (len(edl.clips) - 1)
     profile.transitions = TransitionMix(hard_cut=1 - dissolve, dissolve=dissolve)
