@@ -1,4 +1,4 @@
-"""Energy-based audio gaps, in asset time; no speech model or shot wiring yet."""
+"""Energy-based audio gaps, cached per asset and mapped to shot cut candidates."""
 
 from __future__ import annotations
 
@@ -8,17 +8,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from vlogcut.ingest import ffmpeg
-from vlogcut.schemas import CutPoint
+from vlogcut.schemas import CutPoint, MediaAsset
 
 if TYPE_CHECKING:
     import numpy as np
 
 
 class PauseParams(BaseModel):
-    """Serializable analysis settings for a future per-asset cache key."""
+    """Serializable analysis settings, part of the per-asset cache key."""
 
     model_config = ConfigDict(allow_inf_nan=False)
 
@@ -41,6 +41,25 @@ class Pause:
     @property
     def mid_s(self) -> float:
         return (self.start_s + self.end_s) / 2
+
+
+class PauseCache(BaseModel):
+    """Per-asset detection result; not a cross-module data contract."""
+
+    asset_id: str
+    params: PauseParams
+    pauses: list[Pause]
+
+    @model_validator(mode="after")
+    def _check_intervals(self) -> PauseCache:
+        for pause in self.pauses:
+            if not (
+                math.isfinite(pause.start_s)
+                and math.isfinite(pause.end_s)
+                and 0 <= pause.start_s < pause.end_s
+            ):
+                raise ValueError("pause intervals must be finite, nonnegative and ordered")
+        return self
 
 
 def rms_envelope(samples: np.ndarray, sample_rate: int, frame_s: float = 0.02) -> np.ndarray:
@@ -170,3 +189,28 @@ def detect_pauses(path: str | Path, params: PauseParams | None = None) -> list[P
     # Match the actual frame grid when frame_s * sample_rate is not an integer.
     frame_s = round(params.frame_s * params.sample_rate) / params.sample_rate
     return find_pauses(envelope, frame_s, params)
+
+
+def analyze_pauses(
+    asset: MediaAsset, workspace: str | Path, params: PauseParams | None = None
+) -> list[Pause]:
+    """Detect or load proxy pauses, keyed by asset fingerprint and detection params."""
+    params = params or PauseParams()
+    if asset.proxy_path is None:
+        raise ValueError(f"{asset.path}: no proxy; run ingest.make_proxy first")
+    cache_path = Path(workspace) / "pauses" / f"{asset.asset_id}.json"
+    if cache_path.is_file():
+        try:
+            cache = PauseCache.model_validate_json(cache_path.read_text(encoding="utf-8"))
+            if cache.asset_id == asset.asset_id and cache.params == params:
+                return cache.pauses
+        except (ValidationError, ValueError):
+            pass
+
+    pauses = detect_pauses(asset.proxy_path, params) if asset.has_audio else []
+    cache = PauseCache(asset_id=asset.asset_id, params=params, pauses=pauses)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cache_path.with_suffix(".part")
+    tmp.write_text(cache.model_dump_json(indent=1), encoding="utf-8")
+    tmp.replace(cache_path)
+    return pauses

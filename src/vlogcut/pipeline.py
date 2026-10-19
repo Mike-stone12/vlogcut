@@ -62,11 +62,18 @@ def ingest(
 
 def analyze(assets: list[MediaAsset], workspace: Path, progress: Progress = log.info) -> list[Shot]:
     from vlogcut.analyze import assess_shots, detect_shots  # heavy optional deps
+    from vlogcut.analyze.pauses import analyze_pauses, cut_points_for_span
 
     shots: list[Shot] = []
     for i, asset in enumerate(assets, 1):
         progress(f"[{i}/{len(assets)}] analyze {Path(asset.path).name}")
-        shots += assess_shots(asset, detect_shots(asset, workspace), workspace)
+        asset_shots = assess_shots(asset, detect_shots(asset, workspace), workspace)
+        progress(f"[{i}/{len(assets)}] pauses {Path(asset.path).name}")
+        midpoints = [pause.mid_s for pause in analyze_pauses(asset, workspace)]
+        for shot in asset_shots:
+            # Refresh even on quality-cache hits: old records have no cut points.
+            shot.cut_points = cut_points_for_span(midpoints, shot.start_s, shot.end_s)
+        shots += asset_shots
     return shots
 
 

@@ -78,9 +78,10 @@ ingest → analyze → plan → validate/repair → render/export → feedback
   dimension of the style profile and the planner
 - Caption: **captioner** role (VLM) on 1–3 keyframes → description, tags, interest 1–5.
   Only for shots that survive quality + dedup; the cache key includes the model name
-- Cut-point candidates (planned): speech pauses, beats of the chosen music, motion
-  minima → `Shot.cut_points`; planners choose in/out among these instead of inventing
-  times or inheriting the equal 10 s split boundaries
+- Cut-point candidates: energy-based audio pauses populate `Shot.cut_points` during
+  analysis. Beats of the chosen music, motion minima and planner use remain planned;
+  planners will choose in/out among these instead of inventing times or inheriting
+  the equal 10 s split boundaries
 - Output: `Shot` records, cached in `workspace/<project>/`. Per-asset work is
   independent; `pipeline.py` runs it sequentially today, a thread pool is the easy
   speed-up
@@ -566,8 +567,19 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   strictly inside the shot's start/end; `usable_range` does not constrain them.
   `analyze/pauses.py` maps pause midpoints to sorted, deduplicated candidates with
   `start_s + margin_s < time_s < end_s - margin_s`; the default margin is 0.1 s,
-  zero is allowed, and negative margins raise `ValueError`. Pipeline wiring,
-  caching and planner use are not done yet.
+  zero is allowed, and negative margins raise `ValueError`. Pipeline wiring and
+  caching are implemented; planner use remains to be done.
+
+- 2026-10-23: pause pipeline wiring — `pipeline.analyze` loads or detects pauses once
+  per asset using the existing signed-PCM decoder (16 kHz mono by default), then
+  maps their midpoints to every shot with the default strict 0.1 s interior margin.
+  Assets without audio yield no candidates. `PauseCache` stays in `analyze/pauses.py`;
+  `<workspace>/pauses/<asset_id>.json` is keyed by asset fingerprint and all
+  `PauseParams`. Mismatches or invalid cache records trigger detection; writes use
+  a `.part` file followed by replace. Cut points are refreshed after loading quality
+  caches, including legacy shots without candidates, so returned shots and the
+  written `shots.json` use current pause results without repeating quality analysis.
+  Planner use remains pending; the week-3 cut-point milestone is still incomplete.
 
 ## Open questions
 
