@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from vlogcut.ingest import ProbeError, make_proxy, probe_asset
 from vlogcut.schemas import EDL, MediaAsset, MusicCue, Shot, StyleProfile
+from vlogcut.validate import Violation, validate_edl
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class CutResult(BaseModel):
     edl_path: Path
     preview_path: Path | None
     profile: StyleProfile | None = None  # the style the cut was paced with, if any
+    violations: list[Violation] = Field(default_factory=list)
 
 
 def find_footage(folder: str | Path) -> list[Path]:
@@ -77,6 +79,36 @@ def analyze(assets: list[MediaAsset], workspace: Path, progress: Progress = log.
     return shots
 
 
+def validate_and_write(
+    edl: EDL,
+    shots: Sequence[Shot],
+    edl_path: Path,
+    *,
+    target_s: float,
+    profile: StyleProfile | None = None,
+) -> list[Violation]:
+    """Check an EDL and replace its JSON report, including when no issues remain."""
+    violations = validate_edl(edl, shots, profile, target_s=target_s)
+    path = edl_path.with_suffix(".violations.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(".json.part")
+    temp.write_text(
+        json.dumps([v.model_dump(mode="json") for v in violations], ensure_ascii=False, indent=1),
+        encoding="utf-8",
+    )
+    temp.replace(path)
+    for violation in violations:
+        log.warning(
+            "validation %s (clip %s): %s",
+            violation.code,
+            violation.clip_index,
+            violation.message,
+        )
+    if not violations:
+        log.info("validation: OK")
+    return violations
+
+
 def cut(
     folder: str | Path,
     workspace: str | Path,
@@ -117,6 +149,7 @@ def cut(
     # outputs with and without a style sit side by side (the run manifest replaces this)
     name = f"{strategy}_{target_s:.0f}s" + (f"_{style.stem}" if style else "")
     edl_path = workspace / "edl" / f"{name}.json"
+    violations = validate_and_write(edl, shots, edl_path, target_s=target_s, profile=profile)
     edl_path.parent.mkdir(parents=True, exist_ok=True)
     edl_path.write_text(edl.model_dump_json(indent=1), encoding="utf-8")
     shots_path = workspace / "shots.json"
@@ -136,5 +169,5 @@ def cut(
         )  # fmt: skip
     return CutResult(
         assets=assets, skipped=skipped, shots=shots, edl=edl, edl_path=edl_path,
-        preview_path=preview, profile=profile,
+        preview_path=preview, profile=profile, violations=violations,
     )  # fmt: skip
