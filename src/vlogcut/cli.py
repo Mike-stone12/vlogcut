@@ -1,18 +1,23 @@
 """Command line: `vlogcut cut <footage folder>` -> rough-cut preview,
 `vlogcut style build <reference videos>` -> style profile JSON, `style show / diff`.
+`vlogcut feedback page / pairs` -> local variants page / preference-pair JSON.
 
-Thin wrapper over `vlogcut.pipeline` / `vlogcut.style`; argument parsing and messages only.
+Thin wrapper over pipeline, style and feedback helpers; argument parsing and output only.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
 import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from threading import Lock
+from urllib.parse import quote
 
 from vlogcut import __version__
 
@@ -62,6 +67,16 @@ def build_parser() -> argparse.ArgumentParser:
     d = ss.add_parser("diff", help="distance between two profiles, per dimension")
     d.add_argument("a", type=Path, help="profile JSON")
     d.add_argument("b", type=Path, help="profile JSON")
+
+    f = sub.add_parser("feedback", help="feedback: variants page and preference pairs")
+    fs = f.add_subparsers(dest="feedback_command", required=True)
+    page = fs.add_parser("page", help="create a local page comparing preview videos")
+    page.add_argument("previews", type=Path, nargs="+", metavar="PREVIEW", help="preview mp4s")
+    page.add_argument("-o", "--out", type=Path, default=Path("variants.html"), help="HTML path")
+    pairs = fs.add_parser("pairs", help="derive preference pairs from feedback JSON")
+    pairs.add_argument("feedback_json", type=Path, metavar="FEEDBACK_JSON")
+    pairs.add_argument("--context", default="", help="project or brief description")
+    pairs.add_argument("-o", "--out", type=Path, help="pairs JSON path (default stdout)")
     return parser
 
 
@@ -76,6 +91,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         _quiet_scenedetect()
     if args.command == "cut":
         return _cut(args)
+    if args.command == "feedback":
+        feedback_commands = {"page": _feedback_page, "pairs": _feedback_pairs}
+        return feedback_commands[args.feedback_command](args)
     commands = {"build": _style_build, "show": _style_show, "diff": _style_diff}
     return commands[args.style_command](args)
 
@@ -224,6 +242,53 @@ def _style_diff(args: argparse.Namespace) -> int:
     except StyleError as exc:
         return _fail(str(exc))
     print(format_diff(args.a.name, a, args.b.name, b, profile_distance(a, b)))
+    return 0
+
+
+def _feedback_page(args: argparse.Namespace) -> int:
+    from vlogcut.feedback import VariantEntry, write_variants_page
+
+    try:
+        variants: list[VariantEntry] = []
+        for preview in args.previews:
+            if not preview.is_file():
+                raise FileNotFoundError(f"preview file not found: {preview}")
+            relative = Path(os.path.relpath(preview, args.out.parent)).as_posix()
+            variants.append(
+                VariantEntry(preview.stem.removeprefix("preview_"), quote(relative, safe="/"))
+            )
+        write_variants_page(args.out, variants)
+    except (OSError, ValueError) as exc:
+        return _fail(" ".join(str(exc).split()))
+    print(f"page      {args.out} ({len(variants)} variants)")
+    return 0
+
+
+def _feedback_pairs(args: argparse.Namespace) -> int:
+    from vlogcut.feedback import load_feedback, preference_pairs
+
+    temporary: Path | None = None
+    try:
+        pairs = preference_pairs(load_feedback(args.feedback_json), context=args.context)
+        document = json.dumps([pair.model_dump(mode="json") for pair in pairs], indent=1)
+        if args.out is not None:
+            try:
+                with NamedTemporaryFile(
+                    mode="w", encoding="utf-8", newline="\n", dir=args.out.parent, delete=False
+                ) as handle:
+                    temporary = Path(handle.name)
+                    handle.write(document)
+                temporary.replace(args.out)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+    except (OSError, ValueError) as exc:
+        return _fail(" ".join(str(exc).split()))
+    if args.out is None:
+        print(document)
+        print(f"pairs     {len(pairs)} pairs", file=sys.stderr)
+    else:
+        print(f"pairs     {args.out} ({len(pairs)} pairs)")
     return 0
 
 
