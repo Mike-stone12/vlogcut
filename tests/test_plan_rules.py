@@ -11,6 +11,7 @@ from vlogcut.plan.rules import (
     _lengths,
     apply_cold_open,
     apply_intro_pace,
+    apply_montage,
     assign_lengths,
     assign_transitions,
     avoid_adjacent_duplicates,
@@ -32,7 +33,7 @@ from vlogcut.schemas import (
     TransitionMix,
 )
 from vlogcut.style.distance import profile_from_edl
-from vlogcut.style.profile import duration_stats
+from vlogcut.style.profile import duration_stats, montage_share
 from vlogcut.validate.checks import validate_edl
 
 T0 = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
@@ -537,6 +538,152 @@ def test_fit_lengths_hits_target_within_bounds():
     out = fit_lengths([3, 3, 3], [1.5, 1.5, 1.5], [5, 5, 2], 11)
     assert sum(out) == pytest.approx(11, abs=1e-3)
     assert out[2] == 2 and all(1.5 <= x <= 5 for x in out)
+
+
+def test_apply_montage_late_runs_split_at_talking_and_preserve_inputs() -> None:
+    pace = DurationStats(p10=1, median=4, p90=8)
+    base, caps = [4.0] * 12, [8.0] * 12
+    talking = [i == 8 for i in range(12)]
+    base[8] = caps[8]
+    before = (base.copy(), caps.copy(), talking.copy())
+    shaped = apply_montage(base, caps, talking, pace, 0.5, 52)
+    fitted = fit_lengths(shaped, [pace.p10] * 12, caps, 52)
+    assert [i for i, length in enumerate(fitted) if length < 2] == [5, 6, 7, 9, 10, 11]
+    assert montage_share([fitted], pace.median) == 0.5
+    assert sum(fitted) == pytest.approx(52)
+    assert shaped[8] == caps[8]
+    assert (base, caps, talking) == before
+    assert shaped == apply_montage(tuple(base), tuple(caps), tuple(talking), pace, 0.5, 52)
+
+
+@pytest.mark.parametrize("share", [None, 0, 0.2, 0.25])
+def test_apply_montage_too_few_requested_or_unmeasured_is_unchanged(share: float | None) -> None:
+    base = [4.0] * 10  # round(2.5) == 2
+    pace = DurationStats(p10=1, median=4, p90=8)
+    assert apply_montage(base, [8] * 10, [False] * 10, pace, share, 40) == base
+
+
+@pytest.mark.parametrize("talking", [[True] * 9, [False, False, True] * 3])
+def test_apply_montage_without_eligible_run_is_unchanged(talking: list[bool]) -> None:
+    base = [4.0] * 9
+    pace = DurationStats(p10=1, median=4, p90=8)
+    assert apply_montage(base, [8] * 9, talking, pace, 0.5, 36) == base
+
+
+def test_apply_montage_empty_and_unrepresentable_short_lengths() -> None:
+    pace = DurationStats(p10=1, median=2.001, p90=4)
+    assert apply_montage([], [], [], pace, 1, 10) == []
+    assert apply_montage([2] * 6, [4] * 6, [False] * 6, pace, 0.5, 12) == [2] * 6
+
+
+@pytest.mark.parametrize("target,expected_count", [(30, 4), (32, 3), (36, 0)])
+def test_apply_montage_reduces_count_when_fitting_would_erase_bursts(
+    target: float, expected_count: int
+) -> None:
+    pace = DurationStats(p10=1, median=4, p90=4)
+    base = [3.0] * 10
+    shaped = apply_montage(base, [4] * 10, [False] * 10, pace, 0.6, target)
+    fitted = fit_lengths(shaped, [1] * 10, [4] * 10, target)
+    assert sum(length < 2 for length in fitted) == expected_count
+    assert sum(fitted) == pytest.approx(target)
+    if expected_count == 0:
+        assert shaped == base
+
+
+@pytest.mark.parametrize("strategy", ["coverage", "highlights"])
+@pytest.mark.parametrize("intro_ratio", [None, 0.5, 2.0])
+@pytest.mark.parametrize("cold_open", [False, True])
+def test_rough_cut_montage_bursts_improve_share_and_preserve_invariants(
+    strategy: str, intro_ratio: float | None, cold_open: bool
+) -> None:
+    shots, assets = _day()
+    shots[20].quality.warnings = ["kept_for_audio"]
+    params = RoughCutParams(target_s=60, strategy=strategy)
+    pace = DurationStats(p10=0.75, median=4, p90=6)
+    profile = StyleProfile(
+        shot_duration_s=pace,
+        cuts_per_min=15,
+        cold_open_clips=1,
+        structure=StructureStats(montage_share=0.4, intro_pace_ratio=intro_ratio),
+    )
+    plain_profile = profile.model_copy(
+        update={"structure": StructureStats(montage_share=0, intro_pace_ratio=intro_ratio)}
+    )
+    plain = rough_cut(shots, assets, params, plain_profile)
+    edl = rough_cut(shots, assets, params, profile, cold_open=cold_open)
+    durations = [c.timeline_duration_s for c in edl.clips]
+    assert montage_share([durations], pace.median) >= 3 / len(durations)
+    before, after = profile_from_edl(plain).structure, profile_from_edl(edl).structure
+    assert before is not None and after is not None
+    assert abs(after.montage_share - 0.4) < abs(before.montage_share - 0.4)
+    assert abs(after.montage_share - 0.4) <= 2 / len(durations)
+    assert edl.total_duration_s == pytest.approx(params.target_s, rel=0.1)
+    assert all(pace.p10 <= length <= pace.p90 for length in durations)
+    ids = [c.shot_id for c in edl.clips]
+    original = [c.shot_id for c in plain.clips]
+    assert set(ids) == set(original)
+    body = ids[1:] if cold_open else ids
+    assert body == sorted(body, key=original.index)
+    talk = next(c for c in edl.clips if c.shot_id == shots[20].shot_id)
+    assert talk.in_s == 0 and talk.timeline_duration_s == pace.p90
+    assert (
+        edl.model_dump_json()
+        == rough_cut(shots, assets, params, profile, cold_open=cold_open).model_dump_json()
+    )
+
+
+@pytest.mark.parametrize(
+    "structure",
+    [
+        None,
+        StructureStats(montage_share=0).model_copy(update={"montage_share": None}),
+        StructureStats(montage_share=0),
+    ],
+)
+@pytest.mark.parametrize("with_profile", [False, True])
+def test_rough_cut_disabled_montage_is_byte_identical_to_legacy(
+    monkeypatch: pytest.MonkeyPatch, structure: StructureStats | None, with_profile: bool
+) -> None:
+    shots, assets = _day()
+    params = RoughCutParams(target_s=60)
+    profile = (
+        StyleProfile(
+            shot_duration_s=DurationStats(p10=0.75, median=4, p90=6),
+            cuts_per_min=15,
+            structure=structure,
+        )
+        if with_profile
+        else None
+    )
+    actual = rough_cut(shots, assets, params, profile).model_dump_json().encode()
+    # Bypass the new helper to reproduce the previous planner, including no profile.
+    monkeypatch.setattr("vlogcut.plan.rules.apply_montage", lambda base, *args: list(base))
+    legacy = profile.model_copy(update={"structure": None}) if profile else None
+    assert actual == rough_cut(shots, assets, params, legacy).model_dump_json().encode()
+
+
+@pytest.mark.parametrize(
+    "p10,share,target,talking",
+    [
+        (2, 0.4, 60, False),
+        (2.5, 0.4, 60, False),
+        (1, 0.1, 60, False),
+        (1, 0.4, 10, False),
+        (1, 0.4, 60, True),
+    ],
+)
+def test_rough_cut_impossible_montage_is_byte_identical(
+    p10: float, share: float, target: float, talking: bool
+) -> None:
+    shots, assets = _day()
+    if talking:
+        for shot in shots:
+            shot.quality.warnings = ["kept_for_audio"]
+    profile = StyleProfile(shot_duration_s=DurationStats(p10=p10, median=4, p90=6), cuts_per_min=15)
+    params = RoughCutParams(target_s=target)
+    plain = rough_cut(shots, assets, params, profile).model_dump_json().encode()
+    profile.structure = StructureStats(montage_share=share)
+    assert rough_cut(shots, assets, params, profile).model_dump_json().encode() == plain
 
 
 def test_apply_intro_pace_uses_unscaled_starts_and_preserves_inputs() -> None:

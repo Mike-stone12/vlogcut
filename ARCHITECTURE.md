@@ -107,9 +107,10 @@ flags are skipped: references are finished edits), then aggregate:
   counts between shot kinds), and cold-open measurement remain planned. Pacing alone
   reads as a speed slider; structure is what makes a cut recognisably someone's.
   Cold-open allowance is user-set. The rules planner uses the intro pacing ratio
-  to shape clip lengths before fitting the total and can produce one opt-in cold
+  to shape clip lengths before fitting the total, uses measured `montage_share`
+  to group short clips into consecutive non-talking bursts, and can produce one opt-in cold
   open with `pipeline.cut(cold_open=True)` or `vlogcut cut --cold-open` when a
-  `--style` profile has `cold_open_clips > 0`. Planners do not yet produce montage bursts.
+  `--style` profile has `cold_open_clips > 0`. LLM montage planning remains planned.
 - Transitions: share of hard cuts / dissolves (from `analyze/transitions.py`); fades
   through black currently count as two dissolves
 - Audio: speech-over-music ratio, whether clip audio is kept under music
@@ -269,6 +270,14 @@ maximal run of at least three consecutive shots strictly shorter than half the p
 profile median. Runs stay within each reference's timeline-ordered, post-merge shot
 durations; the share pools shots inside bursts / total shots, not per-reference ratios.
 EDLs use speed-adjusted clip timeline durations in clip order as one sequence.
+The rules planner uses measured positive `montage_share` to request
+`round(montage_share * clip_count)` clips in consecutive non-talking runs of at
+least three, preferring later clips. Short lengths stay at or above p10 and below
+half the profile median after shared-offset fitting where feasible. Insufficient
+room can reduce the burst count; fewer than three requested clips, p10 at or above
+half the median, or no feasible run leave planning unchanged. Missing structure,
+`montage_share` of `None`, and zero preserve the previous EDL JSON. The LLM planner
+does not yet use this dimension.
 `None` means not measured, distinct from a measured zero; old profile JSON without
 `structure` still loads with `None`. The pure helper returns `None` for zero shots;
 profile construction retains its existing pacing errors for insufficient cuts.
@@ -387,6 +396,7 @@ unrelated footage in a way viewers recognise. Protocol:
 
 ### Progress
 
+- [x] Week 3 · structure: rules planner produces montage bursts from montage_share (plan/rules.py)
 - [x] Week 3 · music: --music CLI flag for beat snapping (cli.py)
 - [x] Week 3 · music: opt-in beat snapping of planned EDLs to user music (pipeline.py)
 - [x] Week 4 · analyze: opt-in captioning wired into pipeline and CLI (pipeline.py, cli.py)
@@ -1146,6 +1156,24 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
   warning and plans normally. With opt-in, the LLM planner logs one warning that
   it ignores the flag; its prompt is unchanged, and rules fallback honors the flag.
   Default output bytes and filenames, validation and repair are unchanged.
+
+- 2026-10-19: rules planner montage bursts — pure `plan/rules.apply_montage`
+  shapes bases after intro scaling, before the unchanged shared-offset fit.
+  Request `round(montage_share * k)` burst clips; fill non-talking runs from the
+  end backwards, taking suffixes of at least three clips, favouring the body over
+  the intro without reserving a fixed intro window. Talking clips split runs and
+  retain their cap-based assignment. Short bases use p10 rounded up to milliseconds
+  plus 1 ms; non-burst, non-talking bases absorb any target deficit proportionally
+  to their remaining capacity. Probe the existing fit with unchanged floors/caps,
+  requiring burst lengths at least 1 ms below half the profile median to survive
+  in/out rounding. Try smaller burst counts when capacity is insufficient; if no
+  run of three fits, return the original bases. Missing/zero share, fewer than
+  three requested clips, p10 >= median/2, or no representable short length are
+  exact no-ops. Selection, clip-count adjustment, duplicate avoidance, cut-point
+  placement, transitions and cold-open logic stay unchanged. Burst share is an
+  approximation: fragmented eligible runs, limited capacity, an EDL median that
+  differs from the reference, and a subsequent cold-open move can change the
+  measured share. No schema, CLI, pipeline, style distance or LLM planner changes.
 
 ## Open questions
 
