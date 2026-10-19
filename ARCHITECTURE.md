@@ -367,7 +367,7 @@ Defined in `src/vlogcut/schemas.py`:
 | `Shot` (+ `QualityFlags`) | analyze | plan, validate, render |
 | `StyleProfile` | style | plan, validate, feedback |
 | `EDL` (+ `Clip`, `Transition`, `MusicCue`) | plan | validate, render |
-| `Run`, `RunInputs` | pipeline | run manifest (readers planned) |
+| `Run`, `RunInputs` | pipeline | run manifest loader, CLI `run show` |
 | `Feedback`, `PreferencePair` | feedback | ranker / feedback role |
 
 Changing a schema means updating this file and the tests in the same change.
@@ -579,6 +579,15 @@ inputs and output locations produce identical manifest bytes. Fingerprints do no
 rename or snapshot outputs, so distinct manifests can point to the same overwritten
 EDL. Rendering options and other fields outside `RunInputs` are not fingerprinted.
 
+`vlogcut run show MANIFEST_JSON` accepts an explicit manifest file path, normally
+`<workspace>/runs/<run_id>.json`; workspace directories are not accepted.
+`run.load_run` validates the JSON with `Run` and raises a one-line `ValueError`
+naming the path on I/O, JSON or schema errors. `run.format_run` summarizes every
+field in schema order, including the stored input fingerprint, optional values
+and output paths as recorded. The command prints the summary and exits 0, or
+reports a one-line error on stderr and exits 1. It does not resolve output paths
+or inspect their files.
+
 Planned additions (remaining fields land with the module that needs them):
 
 | Field / model | Why |
@@ -756,6 +765,11 @@ Week 1 complete (2026-10-14): `vlogcut cut <folder>` runs end to end.
 - Every model or prompt change is run against the eval set before merging
 
 ## Decisions log
+
+- 2026-10-19: run manifest reader — add `run.load_run`, `run.format_run` and
+  `vlogcut run show MANIFEST_JSON` for deterministic inspection of one explicit
+  manifest file. Reuse `ValueError` for loading failures; schemas, fingerprinting
+  and manifest writer bytes are unchanged.
 
 - 2026-10-19: opt-in motion-cut wiring — `pipeline.analyze`, `pipeline.cut` and
   `assess_shots` default to `motion_cuts=False`; CLI `cut --motion-cuts` enables it.
